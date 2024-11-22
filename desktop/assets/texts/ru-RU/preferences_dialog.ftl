@@ -17,5 +17,14 @@ log-filename-pattern-with-timestamp = С временной меткой
 storage-backend = Место сохранения файла
 storage-backend-disk = Диск
 storage-backend-memory = Память
-recent-limit = Недавний лимит
+recent-limit = Лимит недавних
 recent-clear = Очистить
+theme = Тема
+theme-system = Как в системе
+theme-light = Светлая
+theme-dark = Тёмная
+# See for context https://github.com/FeralInteractive/gamemode
+gamemode = GameMode
+gamemode-tooltip = GameMode темпоральною добавит сети оптимизации в твоем компьютере и/или в Ruffle. Ruffle просит GameMode только когда фильм играет.
+gamemode-default = По умолчанию
+gamemode-default-tooltip = GameMode будет включено только когда предпочтение власти ставлено на высокий.

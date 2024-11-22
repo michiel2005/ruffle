@@ -3,7 +3,7 @@ mod write;
 
 pub mod storage;
 
-use crate::cli::Opt;
+use crate::cli::{GameModePreference, OpenUrlMode, Opt};
 use crate::gui::ThemePreference;
 use crate::log::FilenamePattern;
 use crate::preferences::read::read_preferences;
@@ -119,6 +119,15 @@ impl GlobalPreferences {
         })
     }
 
+    pub fn gamemode_preference(&self) -> GameModePreference {
+        self.cli.gamemode.unwrap_or_else(|| {
+            self.preferences
+                .lock()
+                .expect("Non-poisoned preferences")
+                .gamemode_preference
+        })
+    }
+
     pub fn language(&self) -> LanguageIdentifier {
         self.preferences
             .lock()
@@ -204,6 +213,15 @@ impl GlobalPreferences {
         self.watchers.theme_preference_watcher.subscribe()
     }
 
+    pub fn open_url_mode(&self) -> OpenUrlMode {
+        self.cli.open_url_mode.unwrap_or_else(|| {
+            self.preferences
+                .lock()
+                .expect("Non-poisoned preferences")
+                .open_url_mode
+        })
+    }
+
     pub fn recents<R>(&self, fun: impl FnOnce(&Recents) -> R) -> R {
         fun(&self.recents.lock().expect("Recents is not reentrant"))
     }
@@ -250,6 +268,7 @@ impl GlobalPreferences {
 pub struct SavedGlobalPreferences {
     pub graphics_backend: GraphicsBackend,
     pub graphics_power_preference: PowerPreference,
+    pub gamemode_preference: GameModePreference,
     pub language: LanguageIdentifier,
     pub output_device: Option<String>,
     pub mute: bool,
@@ -259,6 +278,7 @@ pub struct SavedGlobalPreferences {
     pub log: LogPreferences,
     pub storage: StoragePreferences,
     pub theme_preference: ThemePreference,
+    pub open_url_mode: OpenUrlMode,
 }
 
 impl Default for SavedGlobalPreferences {
@@ -271,6 +291,7 @@ impl Default for SavedGlobalPreferences {
         Self {
             graphics_backend: Default::default(),
             graphics_power_preference: Default::default(),
+            gamemode_preference: Default::default(),
             language: locale,
             output_device: None,
             mute: false,
@@ -280,6 +301,7 @@ impl Default for SavedGlobalPreferences {
             log: Default::default(),
             storage: Default::default(),
             theme_preference: Default::default(),
+            open_url_mode: Default::default(),
         }
     }
 }

@@ -5,6 +5,7 @@ use crate::avm2::bytearray::{Endian, ObjectEncoding};
 use crate::avm2::error::make_error_2008;
 pub use crate::avm2::object::byte_array_allocator;
 use crate::avm2::object::{Object, TObject};
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::string::AvmString;
@@ -41,25 +42,17 @@ pub fn write_bytes<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let bytearray = args
-        .get(0)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_object(activation)?;
-    let offset = args
-        .get(1)
-        .unwrap_or(&Value::Integer(0))
-        .coerce_to_u32(activation)? as usize;
-    let length = args
-        .get(2)
-        .unwrap_or(&Value::Integer(0))
-        .coerce_to_u32(activation)? as usize;
+    let bytearray = args.get_object(activation, 0, "bytes")?;
+    let offset = args.get_u32(activation, 1)? as usize;
+    let length = args.get_u32(activation, 2)? as usize;
+
     if !Object::ptr_eq(this, bytearray) {
         // The ByteArray we are reading from is different than the ByteArray we are writing to,
         // so we are allowed to borrow both at the same time without worrying about a panic
 
         let ba_read = bytearray
             .as_bytearray()
-            .ok_or("ArgumentError: Parameter must be a bytearray")?;
+            .expect("Parameter must be a bytearray");
         let to_write = ba_read
             .read_at(
                 // If length is 0, lets read the remaining bytes of ByteArray from the supplied offset
@@ -99,18 +92,9 @@ pub fn read_bytes<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let bytearray = args
-        .get(0)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_object(activation)?;
-    let offset = args
-        .get(1)
-        .unwrap_or(&Value::Integer(0))
-        .coerce_to_u32(activation)? as usize;
-    let length = args
-        .get(2)
-        .unwrap_or(&Value::Integer(0))
-        .coerce_to_u32(activation)? as usize;
+    let bytearray = args.get_object(activation, 0, "bytes")?;
+    let offset = args.get_u32(activation, 1)? as usize;
+    let length = args.get_u32(activation, 2)? as usize;
 
     if !Object::ptr_eq(this, bytearray) {
         if let Some(bytearray_read) = this.as_bytearray() {
@@ -127,7 +111,7 @@ pub fn read_bytes<'gc>(
 
             let mut ba_write = bytearray
                 .as_bytearray_mut()
-                .ok_or("ArgumentError: Parameter must be a bytearray")?;
+                .expect("Parameter must be a bytearray");
 
             ba_write
                 .write_at(to_write, offset)
@@ -183,39 +167,43 @@ pub fn read_utf<'gc>(
 
     Ok(Value::Undefined)
 }
+
+pub fn strip_bom<'gc>(activation: &mut Activation<'_, 'gc>, mut bytes: &[u8]) -> AvmString<'gc> {
+    // UTF-8 BOM
+    if let Some(without_bom) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        bytes = without_bom;
+    // Little-endian UTF-16 BOM
+    } else if let Some(without_bom) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        let utf16_bytes: Vec<_> = without_bom
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        return AvmString::new(
+            activation.context.gc_context,
+            WString::from_buf(utf16_bytes),
+        );
+    // Big-endian UTF-16 BOM
+    } else if let Some(without_bom) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let utf16_bytes: Vec<_> = without_bom
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        return AvmString::new(
+            activation.context.gc_context,
+            WString::from_buf(utf16_bytes),
+        );
+    }
+
+    AvmString::new_utf8_bytes(activation.context.gc_context, bytes)
+}
+
 pub fn to_string<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(bytearray) = this.as_bytearray() {
-        let mut bytes = bytearray.bytes();
-        if let Some(without_bom) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-            bytes = without_bom;
-        // Little-endian UTF-16 BOM
-        } else if let Some(without_bom) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-            let utf16_bytes: Vec<_> = without_bom
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                .collect();
-            return Ok(AvmString::new(
-                activation.context.gc_context,
-                WString::from_buf(utf16_bytes),
-            )
-            .into());
-        // Big-endian UTF-16 BOM
-        } else if let Some(without_bom) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-            let utf16_bytes: Vec<_> = without_bom
-                .chunks_exact(2)
-                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-                .collect();
-            return Ok(AvmString::new(
-                activation.context.gc_context,
-                WString::from_buf(utf16_bytes),
-            )
-            .into());
-        }
-        return Ok(AvmString::new_utf8_bytes(activation.context.gc_context, bytes).into());
+        return Ok(strip_bom(activation, bytearray.bytes()).into());
     }
 
     Ok(Value::Undefined)

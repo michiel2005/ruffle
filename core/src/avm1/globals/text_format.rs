@@ -4,11 +4,10 @@ use crate::avm1::object::NativeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Activation, ArrayObject, Error, Object, ScriptObject, TObject, Value};
 use crate::avm1_stub;
-use crate::context::GcContext;
 use crate::display_object::{AutoSizeMode, EditText, TDisplayObject};
 use crate::ecma_conversions::round_to_even;
 use crate::html::TextFormat;
-use crate::string::{AvmString, WStr};
+use crate::string::{AvmString, StringContext, WStr};
 use gc_arena::Gc;
 
 macro_rules! getter {
@@ -483,7 +482,7 @@ fn get_text_extent<'gc>(
         .transpose()?;
 
     let temp_edittext = EditText::new(
-        &mut activation.context,
+        activation.context,
         movie,
         0.0,
         0.0,
@@ -491,14 +490,14 @@ fn get_text_extent<'gc>(
         0.0,
     );
 
-    temp_edittext.set_autosize(AutoSizeMode::Left, &mut activation.context);
-    temp_edittext.set_word_wrap(width.is_some(), &mut activation.context);
-    temp_edittext.set_new_text_format(text_format.clone(), &mut activation.context);
-    temp_edittext.set_text(&text, &mut activation.context);
+    temp_edittext.set_autosize(AutoSizeMode::Left, activation.context);
+    temp_edittext.set_word_wrap(width.is_some(), activation.context);
+    temp_edittext.set_new_text_format(text_format.clone(), activation.context);
+    temp_edittext.set_text(&text, activation.context);
 
     let result = ScriptObject::new(activation.gc(), None);
     let metrics = temp_edittext
-        .layout_metrics(None)
+        .layout_metrics()
         .expect("All text boxes should have at least one line at all times");
 
     result.set_data(
@@ -612,7 +611,7 @@ pub fn constructor<'gc>(
 
 /// `TextFormat.prototype` constructor
 pub fn create_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {

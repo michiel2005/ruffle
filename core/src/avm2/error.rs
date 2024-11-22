@@ -9,7 +9,6 @@ use std::mem::size_of;
 use super::function::display_function;
 use super::method::Method;
 use super::ClassObject;
-use super::Object;
 
 /// An error generated while handling AVM2 logic
 pub enum Error<'gc> {
@@ -23,7 +22,7 @@ pub enum Error<'gc> {
     RustError(Box<dyn std::error::Error>),
 }
 
-impl<'gc> Debug for Error<'gc> {
+impl Debug for Error<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Error::AvmError(error) = self {
             if let Some(error) = error.as_object().and_then(|obj| obj.as_error_object()) {
@@ -92,7 +91,7 @@ pub fn make_reference_error<'gc>(
     multiname: &Multiname<'gc>,
     object_class: Class<'gc>,
 ) -> Error<'gc> {
-    let qualified_name = multiname.as_uri(activation.context.gc_context);
+    let qualified_name = multiname.as_uri(activation.strings());
     let class_name = object_class
         .name()
         .to_qualified_name_err_message(activation.context.gc_context);
@@ -256,6 +255,16 @@ pub fn make_error_1032<'gc>(activation: &mut Activation<'_, 'gc>, index: u32) ->
 
 #[inline(never)]
 #[cold]
+pub fn make_error_1033<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = verify_error(activation, "Error #1033: Cpool entry is wrong type.", 1033);
+    match err {
+        Ok(err) => Error::AvmError(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
 pub fn make_error_1054<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
     let err = verify_error(
         activation,
@@ -274,12 +283,26 @@ pub fn make_error_1065<'gc>(
     activation: &mut Activation<'_, 'gc>,
     name: &Multiname<'gc>,
 ) -> Error<'gc> {
-    let qualified_name = name.as_uri(activation.context.gc_context);
+    let qualified_name = name.as_uri(activation.strings());
 
     let err = reference_error(
         activation,
         &format!("Error #1065: Variable {qualified_name} is not defined."),
         1065,
+    );
+    match err {
+        Ok(err) => Error::AvmError(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_1080<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = type_error(
+        activation,
+        "Error #1080: Illegal value for namespace.",
+        1080,
     );
     match err {
         Ok(err) => Error::AvmError(err),
@@ -541,6 +564,20 @@ pub fn make_error_2008<'gc>(activation: &mut Activation<'_, 'gc>, param_name: &s
 
 #[inline(never)]
 #[cold]
+pub fn make_error_2025<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = argument_error(
+        activation,
+        "Error #2025: The supplied DisplayObject must be a child of the caller.",
+        2025,
+    );
+    match err {
+        Ok(err) => Error::AvmError(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
 pub fn make_error_2027<'gc>(activation: &mut Activation<'_, 'gc>, value: i32) -> Error<'gc> {
     let err = range_error(
         activation,
@@ -594,20 +631,6 @@ pub fn make_error_2097<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         activation,
         "Error #2097: The FileFilter Array is not in the correct format.",
         2097,
-    );
-    match err {
-        Ok(err) => Error::AvmError(err),
-        Err(err) => err,
-    }
-}
-
-#[inline(never)]
-#[cold]
-pub fn make_error_2025<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
-    let err = argument_error(
-        activation,
-        "Error #2025: The supplied DisplayObject must be a child of the caller.",
-        2025,
     );
     match err {
         Ok(err) => Error::AvmError(err),
@@ -778,7 +801,7 @@ pub fn make_mismatch_error<'gc>(
     activation: &mut Activation<'_, 'gc>,
     method: Method<'gc>,
     user_arguments: &[Value<'gc>],
-    callee: Option<Object<'gc>>,
+    bound_class: Option<Class<'gc>>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     let expected_num_params = method
         .signature()
@@ -787,17 +810,8 @@ pub fn make_mismatch_error<'gc>(
         .count();
 
     let mut function_name = WString::new();
-    let bound_superclass = callee.and_then(|callee| {
-        if let Some(cls) = callee.as_class_object() {
-            Some(cls)
-        } else {
-            callee
-                .as_function_object()
-                .and_then(|f| f.as_executable().and_then(|e| e.bound_superclass()))
-        }
-    });
 
-    display_function(&mut function_name, &method, bound_superclass);
+    display_function(&mut function_name, &method, bound_class);
 
     return Err(Error::AvmError(argument_error(
         activation,
@@ -822,7 +836,7 @@ fn error_constructor<'gc>(
         .into())
 }
 
-impl<'gc> std::fmt::Display for Error<'gc> {
+impl std::fmt::Display for Error<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }

@@ -8,9 +8,8 @@ use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::ArrayObject;
 use crate::avm1::{globals, Object, ScriptObject, TObject, Value};
 use crate::avm1_stub;
-use crate::context::GcContext;
 use crate::display_object::{Avm1Button, TDisplayObject, TInteractiveObject};
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 
 macro_rules! button_getter {
     ($name:ident) => {
@@ -52,7 +51,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn create_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
@@ -115,9 +114,7 @@ fn set_filters<'gc>(
     if let Value::Object(value) = value {
         for index in value.get_keys(activation, false).into_iter().rev() {
             let filter_object = value.get(index, activation)?.coerce_to_object(activation);
-            if let Some(filter) =
-                bitmap_filter::avm1_to_filter(filter_object, &mut activation.context)
-            {
+            if let Some(filter) = bitmap_filter::avm1_to_filter(filter_object, activation.context) {
                 filters.push(filter);
             }
         }
@@ -203,7 +200,7 @@ fn set_tab_index<'gc>(
             }
             _ => Some(i32::MIN),
         };
-        this.set_tab_index(&mut activation.context, value);
+        this.set_tab_index(activation.context, value);
     }
     Ok(())
 }

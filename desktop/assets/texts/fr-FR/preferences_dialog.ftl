@@ -19,3 +19,14 @@ storage-backend-disk = Disque
 storage-backend-memory = Mémoire
 recent-limit = Limite de fichiers récents
 recent-clear = Effacer
+theme = Thème
+theme-system = Valeur système par défaut
+theme-light = Mode clair
+theme-dark = Mode sombre
+# See for context https://github.com/FeralInteractive/gamemode
+gamemode = GameMode
+gamemode-tooltip =
+    GameMode applique temporairement un ensemble d'optimisations à votre ordinateur et/ou Ruffle.
+    Ruffle n'active GameMode que lorsqu'un film est en cours de lecture.
+gamemode-default = Par défaut
+gamemode-default-tooltip = GameMode ne sera activé que si la préférence d'alimentation est définie sur élevée.

@@ -19,3 +19,10 @@ storage-backend-disk = Disco
 storage-backend-memory = Memoria
 recent-limit = Límite de recientes
 recent-clear = Borrar
+theme = Tema
+theme-system = Predeterminado del sistema
+theme-light = Claro
+theme-dark = Oscuro
+# See for context https://github.com/FeralInteractive/gamemode
+gamemode = GameMode
+gamemode-default = Por defecto

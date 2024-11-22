@@ -3,7 +3,6 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
-use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::bitmap::bitmap_data::BitmapDataWrapper;
 use core::fmt;
@@ -88,7 +87,6 @@ impl<'gc> BitmapDataObject<'gc> {
         .into();
 
         bitmap_data.init_object2(activation.context.gc_context, instance);
-        instance.install_instance_slots(activation.context.gc_context);
 
         // We call the custom BitmapData class with width and height...
         // but, it always seems to be 1 in Flash Player when constructed from timeline?
@@ -96,7 +94,7 @@ impl<'gc> BitmapDataObject<'gc> {
         // when the custom class makes a super() call, the BitmapData constructor will
         // load in the real data from the linked SymbolClass.
         if class != activation.avm2().classes().bitmapdata {
-            class.call_native_init(instance.into(), &[1.into(), 1.into()], activation)?;
+            class.call_init(instance.into(), &[1.into(), 1.into()], activation)?;
         }
 
         Ok(instance)
@@ -114,10 +112,6 @@ impl<'gc> TObject<'gc> for BitmapDataObject<'gc> {
 
     fn as_ptr(&self) -> *const ObjectPtr {
         Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
     }
 
     fn as_bitmap_data(&self) -> Option<BitmapDataWrapper<'gc>> {

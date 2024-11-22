@@ -5,7 +5,8 @@ use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::object::NativeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Activation, ArrayObject, Error, Object, ScriptObject, TObject, Value};
-use crate::context::{GcContext, UpdateContext};
+use crate::context::UpdateContext;
+use crate::string::StringContext;
 use gc_arena::{Collect, GcCell, Mutation};
 use std::ops::Deref;
 use swf::{Color, ConvolutionFilterFlags};
@@ -94,7 +95,7 @@ impl Default for ConvolutionFilterData {
     }
 }
 
-#[derive(Clone, Debug, Collect)]
+#[derive(Copy, Clone, Debug, Collect)]
 #[collect(no_drop)]
 #[repr(transparent)]
 pub struct ConvolutionFilter<'gc>(GcCell<'gc, ConvolutionFilterData>);
@@ -120,7 +121,18 @@ impl<'gc> ConvolutionFilter<'gc> {
         convolution_filter.set_bias(activation, args.get(4))?;
         convolution_filter.set_preserve_alpha(activation, args.get(5))?;
         convolution_filter.set_clamp(activation, args.get(6))?;
-        convolution_filter.set_color(activation, args.get(7))?;
+        if let Some(value) = args.get(7) {
+            convolution_filter.set_color(activation, Some(value))?;
+
+            // If a substitute color is specified in the constructor in AVM1,
+            // the substitute alpha is set to 1, despite the documentation claiming otherwise.
+            // This does not happen in AVM2.
+            convolution_filter
+                .0
+                .write(activation.context.gc_context)
+                .color
+                .a = 255;
+        }
         convolution_filter.set_alpha(activation, args.get(8))?;
         Ok(convolution_filter)
     }
@@ -169,7 +181,7 @@ impl<'gc> ConvolutionFilter<'gc> {
         Ok(())
     }
 
-    fn matrix(&self, context: &mut UpdateContext<'_, 'gc>) -> ArrayObject<'gc> {
+    fn matrix(&self, context: &mut UpdateContext<'gc>) -> ArrayObject<'gc> {
         ArrayObject::new(
             context.gc_context,
             context.avm1.prototypes().array,
@@ -368,7 +380,7 @@ fn method<'gc>(
             this.set_matrix_y(activation, args.get(0))?;
             Value::Undefined
         }
-        GET_MATRIX => this.matrix(&mut activation.context).into(),
+        GET_MATRIX => this.matrix(activation.context).into(),
         SET_MATRIX => {
             this.set_matrix(activation, args.get(0))?;
             Value::Undefined
@@ -408,7 +420,7 @@ fn method<'gc>(
 }
 
 pub fn create_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
@@ -418,7 +430,7 @@ pub fn create_proto<'gc>(
 }
 
 pub fn create_constructor<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {

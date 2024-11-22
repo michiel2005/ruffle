@@ -19,7 +19,7 @@ pub fn bitmap_allocator<'gc>(
     class: ClassObject<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
-    let bitmap_cls = activation.avm2().classes().bitmap.inner_class_definition();
+    let bitmap_cls = activation.avm2().class_defs().bitmap;
     let bitmapdata_cls = activation.context.avm2.classes().bitmapdata;
 
     let mut class_def = Some(class.inner_class_definition());
@@ -98,7 +98,7 @@ pub fn init<'gc>(
 
     if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
         if let Some(bitmap_data) = bitmap_data {
-            bitmap.set_bitmap_data(&mut activation.context, bitmap_data);
+            bitmap.set_bitmap_data(activation.context, bitmap_data);
         }
         bitmap.set_smoothing(activation.context.gc_context, smoothing);
         bitmap.set_pixel_snapping(activation.context.gc_context, pixel_snapping);
@@ -135,16 +135,16 @@ pub fn set_bitmap_data<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
-        let bitmap_data = args.get(0).unwrap_or(&Value::Null);
-        let bitmap_data = if matches!(bitmap_data, Value::Null) {
-            BitmapDataWrapper::dummy(activation.context.gc_context)
+        let bitmap_data = args.try_get_object(activation, 0);
+
+        let bitmap_data = if let Some(bitmap_data) = bitmap_data {
+            bitmap_data.as_bitmap_data().expect("Must be a BitmapData")
         } else {
-            bitmap_data
-                .coerce_to_object(activation)?
-                .as_bitmap_data()
-                .ok_or_else(|| Error::RustError("Argument was not a BitmapData".into()))?
+            // Passing null results in a dummy BitmapData being set.
+            BitmapDataWrapper::dummy(activation.gc())
         };
-        bitmap.set_bitmap_data(&mut activation.context, bitmap_data);
+
+        bitmap.set_bitmap_data(activation.context, bitmap_data);
     }
 
     Ok(Value::Undefined)

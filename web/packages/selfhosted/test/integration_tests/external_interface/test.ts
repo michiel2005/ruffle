@@ -8,6 +8,7 @@ import {
 } from "../../utils.js";
 import { expect, use } from "chai";
 import chaiHtml from "chai-html";
+import { Player } from "ruffle-core";
 
 use(chaiHtml);
 
@@ -47,6 +48,13 @@ declare global {
 
             // Calls `ExternalInterface.addCallback(name, function() { return returnValue; })`
             addAnotherCallback: (name: string, returnValue: unknown) => void;
+
+            // Going to be redefined as part of a test
+            redefinedMethod: () => string;
+
+            ruffle<V extends keyof Player.APIVersions = 1>(
+                version?: V,
+            ): Player.APIVersions[V];
         }
     }
 
@@ -132,10 +140,30 @@ ExternalInterface.objectID: "flash_name"
         );
     });
 
-    it("returns a value", async () => {
+    it("returns a value with legacy API", async () => {
         const player = await browser.$("<ruffle-object>");
         const returned = await browser.execute(
             (player) => player.returnAValue(123.4),
+            player,
+        );
+
+        expect(returned).to.eql(123.4);
+
+        const actualOutput = await getTraceOutput(browser, player);
+        expect(actualOutput).to.eql(
+            `returnAValue called with 123.4
+  [
+    123.4
+  ]
+`,
+        );
+    });
+
+    it("returns a value with V1 API", async () => {
+        const player = await browser.$("<ruffle-object>");
+        const returned = await browser.execute(
+            (player) =>
+                player.ruffle().callExternalInterface("returnAValue", 123.4),
             player,
         );
 
@@ -319,5 +347,45 @@ log called with 1 argument
 
         actualOutput = await getTraceOutput(browser, player);
         expect(actualOutput).to.eql(`isPlaying called\n`);
+    });
+
+    it("allows redefining a method", async () => {
+        const player = await browser.$("<ruffle-object>");
+
+        // First definition
+        await browser.execute((player) => {
+            player.addAnotherCallback("redefinedMethod", "first definition");
+        }, player);
+
+        let actualOutput = await getTraceOutput(browser, player);
+        expect(actualOutput).to.eql(
+            `addAnotherCallback called for "redefinedMethod" to return "first definition"\n`,
+        );
+
+        let methodResult = await browser.execute((player) => {
+            return (player as unknown as any).redefinedMethod();
+        }, player);
+        expect(methodResult).to.eql("first definition");
+
+        actualOutput = await getTraceOutput(browser, player);
+        expect(actualOutput).to.eql(`redefinedMethod called\n`);
+
+        // Second definition
+        await browser.execute((player) => {
+            player.addAnotherCallback("redefinedMethod", "second definition");
+        }, player);
+
+        actualOutput = await getTraceOutput(browser, player);
+        expect(actualOutput).to.eql(
+            `addAnotherCallback called for "redefinedMethod" to return "second definition"\n`,
+        );
+
+        methodResult = await browser.execute((player) => {
+            return (player as unknown as any).redefinedMethod();
+        }, player);
+        expect(methodResult).to.eql("second definition");
+
+        actualOutput = await getTraceOutput(browser, player);
+        expect(actualOutput).to.eql(`redefinedMethod called\n`);
     });
 });

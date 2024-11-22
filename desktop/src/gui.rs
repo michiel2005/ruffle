@@ -1,13 +1,16 @@
 mod context_menu;
 mod controller;
-mod dialogs;
+pub mod dialogs;
 mod menu_bar;
 mod movie;
+mod picker;
 mod theme;
 mod widgets;
 
 pub use controller::GuiController;
+pub use dialogs::DialogDescriptor;
 pub use movie::MovieView;
+pub use picker::FilePicker;
 use std::borrow::Cow;
 pub use theme::ThemePreference;
 use url::Url;
@@ -25,7 +28,7 @@ use rfd::FileDialog;
 use ruffle_core::debug_ui::Message as DebugMessage;
 use ruffle_core::{Player, PlayerEvent};
 use std::collections::HashMap;
-use std::sync::MutexGuard;
+use std::sync::{MutexGuard, Weak};
 use std::{fs, mem};
 use unic_langid::LanguageIdentifier;
 use winit::event_loop::EventLoopProxy;
@@ -48,7 +51,10 @@ pub fn text<'a>(locale: &LanguageIdentifier, id: &'a str) -> Cow<'a, str> {
 }
 
 pub fn optional_text(locale: &LanguageIdentifier, id: &str) -> Option<String> {
-    TEXTS.lookup_single_language::<&str>(locale, id, None)
+    TEXTS
+        .lookup_single_language::<&str>(locale, id, None)
+        .inspect_err(|e| tracing::trace!("Error looking up text: {e}"))
+        .ok()
 }
 
 pub fn available_languages() -> Vec<&'static LanguageIdentifier> {
@@ -72,6 +78,21 @@ pub fn text_with_args<'a, T: AsRef<str>>(
         })
 }
 
+pub enum LocalizableText {
+    NonLocalizedText(Cow<'static, str>),
+    LocalizedText(&'static str),
+}
+
+impl LocalizableText {
+    pub fn localize(&self, locale: &LanguageIdentifier) -> Cow<'_, str> {
+        match self {
+            LocalizableText::NonLocalizedText(Cow::Borrowed(text)) => Cow::Borrowed(text),
+            LocalizableText::NonLocalizedText(Cow::Owned(text)) => Cow::Borrowed(text),
+            LocalizableText::LocalizedText(id) => text(locale, id),
+        }
+    }
+}
+
 /// Size of the top menu bar in pixels.
 /// This is the offset at which the movie will be shown,
 /// and added to the window size if trying to match a movie.
@@ -90,6 +111,7 @@ pub struct RuffleGui {
 
 impl RuffleGui {
     fn new(
+        window: Weak<winit::window::Window>,
         event_loop: EventLoopProxy<RuffleEvent>,
         default_path: Option<Url>,
         default_launch_options: LaunchOptions,
@@ -103,6 +125,7 @@ impl RuffleGui {
                 preferences.clone(),
                 default_launch_options.clone(),
                 default_path,
+                window.clone(),
                 event_loop.clone(),
             ),
             menu_bar: MenuBar::new(
@@ -126,6 +149,8 @@ impl RuffleGui {
     ) {
         let locale = self.preferences.language();
 
+        self.menu_bar
+            .consume_shortcuts(egui_ctx, &mut self.dialogs, player.as_deref_mut());
         if show_menu {
             self.menu_bar
                 .show(&locale, egui_ctx, &mut self.dialogs, player.as_deref_mut());
@@ -161,7 +186,7 @@ impl RuffleGui {
             }
 
             if let Some(context_menu) = &mut self.context_menu {
-                if !context_menu.show(egui_ctx, &self.event_loop) {
+                if !context_menu.show(&locale, egui_ctx, &self.event_loop, player.is_fullscreen()) {
                     self.close_context_menu(player);
                 }
             }
@@ -186,6 +211,11 @@ impl RuffleGui {
 
     pub fn is_context_menu_visible(&self) -> bool {
         self.context_menu.is_some()
+    }
+
+    /// Notifies the GUI that the player has been destroyed.
+    fn on_player_destroyed(&mut self) {
+        self.dialogs.close_dialogs_with_notifiers();
     }
 
     /// Notifies the GUI that a new player was created.

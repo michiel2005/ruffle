@@ -16,7 +16,7 @@ use crate::context::UpdateContext;
 use crate::string::WString;
 use bitflags::bitflags;
 use fnv::FnvHashMap;
-use gc_arena::{Collect, GcCell, Mutation};
+use gc_arena::{Collect, Gc, GcCell, Mutation};
 
 use std::cell::Ref;
 use std::collections::HashSet;
@@ -68,6 +68,16 @@ pub type AllocatorFn =
 
 #[derive(Clone, Copy)]
 pub struct Allocator(pub AllocatorFn);
+
+/// A function that can be used to both allocate and construct an instance of a class.
+///
+/// This function should be passed an Activation, and the arguments passed to the
+/// constructor, and will return an Object.
+pub type CustomConstructorFn =
+    for<'gc> fn(&mut Activation<'_, 'gc>, &[Value<'gc>]) -> Result<Object<'gc>, Error<'gc>>;
+
+#[derive(Clone, Copy)]
+pub struct CustomConstructor(pub CustomConstructorFn);
 
 impl fmt::Debug for Allocator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -129,20 +139,6 @@ pub struct ClassData<'gc> {
     /// Must be called each time a new class instance is constructed.
     instance_init: Method<'gc>,
 
-    /// The native instance initializer for this class.
-    ///
-    /// This may be provided to allow natively-constructed classes to
-    /// initialize themselves in a different manner from user-constructed ones.
-    /// For example, the user-accessible constructor may error out (as it's not
-    /// a valid class to construct for users), but native code may still call
-    /// it's constructor stack.
-    ///
-    /// By default, a class's `native_instance_init` will be initialized to the
-    /// same method as the regular one. You must specify a separate native
-    /// initializer to change initialization behavior based on what code is
-    /// constructing the class.
-    native_instance_init: Method<'gc>,
-
     /// Traits for a given class.
     ///
     /// These are accessed as normal instance properties; they should not be
@@ -155,6 +151,12 @@ pub struct ClassData<'gc> {
     /// The customization point for `Class(args...)` without `new`
     /// If None, a simple coercion is done.
     call_handler: Option<Method<'gc>>,
+
+    /// The custom constructor for this class, if it exists.
+    ///
+    /// This function will both allocate and initialize the class.
+    #[collect(require_static)]
+    custom_constructor: Option<CustomConstructor>,
 
     /// Whether or not this `Class` has loaded its traits or not.
     traits_loaded: bool,
@@ -198,7 +200,7 @@ impl Hash for Class<'_> {
     }
 }
 
-impl<'gc> core::fmt::Debug for Class<'gc> {
+impl core::fmt::Debug for Class<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         f.debug_struct("Class").field("name", &self.name()).finish()
     }
@@ -221,8 +223,6 @@ impl<'gc> Class<'gc> {
         class_i_class: Class<'gc>,
         mc: &Mutation<'gc>,
     ) -> Self {
-        let native_instance_init = instance_init;
-
         let instance_allocator = super_class
             .map(|c| c.instance_allocator())
             .unwrap_or(Allocator(scriptobject_allocator));
@@ -239,10 +239,10 @@ impl<'gc> Class<'gc> {
                 all_interfaces: Vec::new(),
                 instance_allocator,
                 instance_init,
-                native_instance_init,
                 traits: Vec::new(),
                 vtable: VTable::empty(mc),
                 call_handler: None,
+                custom_constructor: None,
                 traits_loaded: false,
                 is_system: true,
                 linked_class: ClassLink::Unlinked,
@@ -269,10 +269,10 @@ impl<'gc> Class<'gc> {
                 all_interfaces: Vec::new(),
                 instance_allocator: Allocator(scriptobject_allocator),
                 instance_init: class_init,
-                native_instance_init: class_init,
                 traits: Vec::new(),
                 vtable: VTable::empty(mc),
                 call_handler: None,
+                custom_constructor: None,
                 traits_loaded: false,
                 is_system: true,
                 linked_class: ClassLink::LinkToInstance(i_class),
@@ -292,8 +292,6 @@ impl<'gc> Class<'gc> {
         instance_init: Method<'gc>,
         mc: &Mutation<'gc>,
     ) -> Self {
-        let native_instance_init = instance_init;
-
         Class(GcCell::new(
             mc,
             ClassData {
@@ -306,10 +304,10 @@ impl<'gc> Class<'gc> {
                 all_interfaces: Vec::new(),
                 instance_allocator: Allocator(scriptobject_allocator),
                 instance_init,
-                native_instance_init,
                 traits: Vec::new(),
                 vtable: VTable::empty(mc),
                 call_handler: None,
+                custom_constructor: None,
                 traits_loaded: false,
                 is_system: true,
                 linked_class: ClassLink::Unlinked,
@@ -328,7 +326,7 @@ impl<'gc> Class<'gc> {
     /// This is used to parameterize a generic type. The returned class will no
     /// longer be generic.
     pub fn with_type_param(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         this: Class<'gc>,
         param: Option<Class<'gc>>,
     ) -> Class<'gc> {
@@ -367,7 +365,7 @@ impl<'gc> Class<'gc> {
             ),
             object_vector_i_class.instance_init(),
             object_vector_c_class.instance_init(),
-            context.avm2.classes().class.inner_class_definition(),
+            context.avm2.class_defs().class,
             mc,
         );
 
@@ -438,53 +436,45 @@ impl<'gc> Class<'gc> {
             .ok_or_else(|| "LoadError: Instance index not valid".into());
         let abc_instance = abc_instance?;
 
-        let name = QName::from_abc_multiname(unit, abc_instance.name, &mut activation.context)?;
+        let name = QName::from_abc_multiname(activation, unit, abc_instance.name)?;
+
         let super_class = if abc_instance.super_name.0 == 0 {
             None
         } else {
-            let multiname =
-                unit.pool_multiname_static(abc_instance.super_name, &mut activation.context)?;
+            let multiname = unit.pool_multiname_static(activation, abc_instance.super_name)?;
 
             Some(
                 activation
                     .domain()
-                    .get_class(&mut activation.context, &multiname)
+                    .get_class(activation.context, &multiname)
                     .ok_or_else(|| {
-                        make_error_1014(
-                            activation,
-                            multiname.to_qualified_name(activation.context.gc_context),
-                        )
+                        make_error_1014(activation, multiname.to_qualified_name(activation.gc()))
                     })?,
             )
         };
 
         let protected_namespace = if let Some(ns) = &abc_instance.protected_namespace {
-            Some(unit.pool_namespace(*ns, &mut activation.context)?)
+            Some(unit.pool_namespace(activation, *ns)?)
         } else {
             None
         };
 
         let mut interfaces = Vec::with_capacity(abc_instance.interfaces.len());
         for interface_name in &abc_instance.interfaces {
-            let multiname = unit.pool_multiname_static(*interface_name, &mut activation.context)?;
+            let multiname = unit.pool_multiname_static(activation, *interface_name)?;
 
             interfaces.push(
                 activation
                     .domain()
-                    .get_class(&mut activation.context, &multiname)
+                    .get_class(activation.context, &multiname)
                     .ok_or_else(|| {
-                        make_error_1014(
-                            activation,
-                            multiname.to_qualified_name(activation.context.gc_context),
-                        )
+                        make_error_1014(activation, multiname.to_qualified_name(activation.gc()))
                     })?,
             );
         }
 
         let instance_init = unit.load_method(abc_instance.init_method, false, activation)?;
-        let mut native_instance_init = instance_init;
         let class_init = unit.load_method(abc_class.init_method, false, activation)?;
-        let mut native_call_handler = None;
 
         let mut attributes = ClassAttributes::empty();
         attributes.set(ClassAttributes::SEALED, abc_instance.is_sealed);
@@ -492,6 +482,8 @@ impl<'gc> Class<'gc> {
         attributes.set(ClassAttributes::INTERFACE, abc_instance.is_interface);
 
         let mut instance_allocator = None;
+        let mut call_handler = None;
+        let mut custom_constructor = None;
 
         // When loading a class from our playerglobal, grab the corresponding native
         // allocator function from the table (which may be `None`)
@@ -499,20 +491,6 @@ impl<'gc> Class<'gc> {
             instance_allocator = activation.avm2().native_instance_allocator_table
                 [class_index as usize]
                 .map(|(_name, ptr)| Allocator(ptr));
-
-            if let Some((name, table_native_init)) =
-                activation.avm2().native_instance_init_table[class_index as usize]
-            {
-                let method = Method::from_builtin_and_params(
-                    table_native_init,
-                    name,
-                    instance_init.signature().to_vec(),
-                    instance_init.return_type(),
-                    instance_init.is_variadic(),
-                    activation.context.gc_context,
-                );
-                native_instance_init = method;
-            }
 
             if let Some((name, table_native_call_handler)) =
                 activation.avm2().native_call_handler_table[class_index as usize]
@@ -523,11 +501,18 @@ impl<'gc> Class<'gc> {
                     // A 'callable' class doesn't have a signature - let the
                     // method do any needed coercions
                     vec![],
-                    Multiname::any(activation.context.gc_context),
+                    None,
                     true,
                     activation.context.gc_context,
                 );
-                native_call_handler = Some(method);
+                call_handler = Some(method);
+            }
+
+            // We only store the `name` for consistency with the other tables
+            if let Some((_name, table_custom_constructor)) =
+                activation.avm2().native_custom_constructor_table[class_index as usize]
+            {
+                custom_constructor = Some(table_custom_constructor);
             }
         }
 
@@ -547,10 +532,10 @@ impl<'gc> Class<'gc> {
                 all_interfaces: Vec::new(),
                 instance_allocator,
                 instance_init,
-                native_instance_init,
                 traits: Vec::new(),
                 vtable: VTable::empty(activation.context.gc_context),
-                call_handler: native_call_handler,
+                call_handler,
+                custom_constructor: custom_constructor.map(CustomConstructor),
                 traits_loaded: false,
                 is_system: false,
                 linked_class: ClassLink::Unlinked,
@@ -573,17 +558,17 @@ impl<'gc> Class<'gc> {
             ClassData {
                 name: c_name,
                 param: None,
-                super_class: Some(activation.avm2().classes().class.inner_class_definition()),
+                super_class: Some(activation.avm2().class_defs().class),
                 attributes: ClassAttributes::FINAL,
                 protected_namespace,
                 direct_interfaces: Vec::new(),
                 all_interfaces: Vec::new(),
                 instance_allocator: Allocator(scriptobject_allocator),
                 instance_init: class_init,
-                native_instance_init: class_init,
                 traits: Vec::new(),
                 vtable: VTable::empty(activation.context.gc_context),
                 call_handler: None,
+                custom_constructor: None,
                 traits_loaded: false,
                 is_system: false,
                 linked_class: ClassLink::LinkToInstance(i_class),
@@ -730,7 +715,7 @@ impl<'gc> Class<'gc> {
         Ok(())
     }
 
-    pub fn init_vtable(self, context: &mut UpdateContext<'_, 'gc>) -> Result<(), Error<'gc>> {
+    pub fn init_vtable(self, context: &mut UpdateContext<'gc>) -> Result<(), Error<'gc>> {
         let read = self.0.read();
 
         if !read.traits_loaded {
@@ -742,7 +727,6 @@ impl<'gc> Class<'gc> {
         read.vtable.init_vtable(
             self,
             None,
-            &read.traits,
             None,
             read.super_class.map(|c| c.vtable()),
             context.gc_context,
@@ -754,7 +738,7 @@ impl<'gc> Class<'gc> {
         Ok(())
     }
 
-    pub fn link_interfaces(self, context: &mut UpdateContext<'_, 'gc>) -> Result<(), Error<'gc>> {
+    pub fn link_interfaces(self, context: &mut UpdateContext<'gc>) -> Result<(), Error<'gc>> {
         let mut interfaces = Vec::with_capacity(self.direct_interfaces().len());
 
         let mut dedup = HashSet::new();
@@ -784,13 +768,11 @@ impl<'gc> Class<'gc> {
         // interfaces (i.e. those that were not already implemented by the superclass)
         // Otherwise, our behavior diverges from Flash Player in certain cases.
         // See the ignored test 'tests/tests/swfs/avm2/weird_superinterface_properties/'
+        let ns = context.avm2.namespaces.public_vm_internal();
         for interface in &interfaces {
             for interface_trait in &*interface.traits() {
                 if !interface_trait.name().namespace().is_public() {
-                    let public_name = QName::new(
-                        context.avm2.public_namespace_vm_internal,
-                        interface_trait.name().local_name(),
-                    );
+                    let public_name = QName::new(ns, interface_trait.name().local_name());
                     self.0.read().vtable.copy_property_for_interface(
                         context.gc_context,
                         public_name,
@@ -811,8 +793,7 @@ impl<'gc> Class<'gc> {
         method: &AbcMethod,
         body: &AbcMethodBody,
     ) -> Result<Class<'gc>, Error<'gc>> {
-        let name =
-            translation_unit.pool_string(method.name.as_u30(), &mut activation.borrow_gc())?;
+        let name = translation_unit.pool_string(method.name.as_u30(), activation.strings())?;
         let mut traits = Vec::with_capacity(body.traits.len());
 
         for trait_entry in body.traits.iter() {
@@ -823,7 +804,7 @@ impl<'gc> Class<'gc> {
             )?);
         }
 
-        let name = QName::new(activation.avm2().public_namespace_base_version, name);
+        let name = QName::new(activation.avm2().namespaces.public_all(), name);
 
         let i_class = Class(GcCell::new(
             activation.context.gc_context,
@@ -841,14 +822,10 @@ impl<'gc> Class<'gc> {
                     "<Activation object constructor>",
                     activation.context.gc_context,
                 ),
-                native_instance_init: Method::from_builtin(
-                    |_, _, _| Ok(Value::Undefined),
-                    "<Activation object constructor>",
-                    activation.context.gc_context,
-                ),
                 traits,
                 vtable: VTable::empty(activation.context.gc_context),
                 call_handler: None,
+                custom_constructor: None,
                 traits_loaded: true,
                 is_system: false,
                 linked_class: ClassLink::Unlinked,
@@ -871,7 +848,7 @@ impl<'gc> Class<'gc> {
             ClassData {
                 name: c_name,
                 param: None,
-                super_class: Some(activation.avm2().classes().class.inner_class_definition()),
+                super_class: Some(activation.avm2().class_defs().class),
                 attributes: ClassAttributes::FINAL,
                 protected_namespace: None,
                 direct_interfaces: Vec::new(),
@@ -882,14 +859,10 @@ impl<'gc> Class<'gc> {
                     "<Activation object class constructor>",
                     activation.context.gc_context,
                 ),
-                native_instance_init: Method::from_builtin(
-                    |_, _, _| Ok(Value::Undefined),
-                    "<Activation object class constructor>",
-                    activation.context.gc_context,
-                ),
                 traits: Vec::new(),
                 vtable: VTable::empty(activation.context.gc_context),
                 call_handler: None,
+                custom_constructor: None,
                 traits_loaded: true,
                 is_system: false,
                 linked_class: ClassLink::LinkToInstance(i_class),
@@ -900,8 +873,8 @@ impl<'gc> Class<'gc> {
 
         i_class.set_c_class(activation.context.gc_context, c_class);
 
-        i_class.init_vtable(&mut activation.context)?;
-        c_class.init_vtable(&mut activation.context)?;
+        i_class.init_vtable(activation.context)?;
+        c_class.init_vtable(activation.context)?;
 
         Ok(i_class)
     }
@@ -1028,10 +1001,10 @@ impl<'gc> Class<'gc> {
         value: Value<'gc>,
     ) {
         self.define_instance_trait(
-            activation.context.gc_context,
+            activation.gc(),
             Trait::from_const(
                 name,
-                Multiname::new(activation.avm2().public_namespace_base_version, "Function"),
+                Some(activation.avm2().multinames.function),
                 Some(value),
             ),
         );
@@ -1046,10 +1019,10 @@ impl<'gc> Class<'gc> {
     ) {
         for &(name, value) in items {
             self.define_class_trait(
-                activation.context.gc_context,
+                activation.gc(),
                 Trait::from_const(
                     QName::new(namespace, name),
-                    Multiname::new(activation.avm2().public_namespace_base_version, "Number"),
+                    Some(activation.avm2().multinames.number),
                     Some(value.into()),
                 ),
             );
@@ -1065,10 +1038,10 @@ impl<'gc> Class<'gc> {
     ) {
         for &(name, value) in items {
             self.define_class_trait(
-                activation.context.gc_context,
+                activation.gc(),
                 Trait::from_const(
                     QName::new(namespace, name),
-                    Multiname::new(activation.avm2().public_namespace_base_version, "uint"),
+                    Some(activation.avm2().multinames.uint),
                     Some(value.into()),
                 ),
             );
@@ -1087,7 +1060,7 @@ impl<'gc> Class<'gc> {
                 activation.context.gc_context,
                 Trait::from_const(
                     QName::new(namespace, name),
-                    Multiname::new(activation.avm2().public_namespace_base_version, "int"),
+                    Some(activation.avm2().multinames.int),
                     Some(value.into()),
                 ),
             );
@@ -1112,6 +1085,7 @@ impl<'gc> Class<'gc> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     #[inline(never)]
     pub fn define_builtin_instance_methods_with_sig(
         self,
@@ -1121,7 +1095,7 @@ impl<'gc> Class<'gc> {
             &'static str,
             NativeMethodImpl,
             Vec<ParamConfig<'gc>>,
-            Multiname<'gc>,
+            Option<Gc<'gc, Multiname<'gc>>>,
         )>,
     ) {
         for (name, value, params, return_type) in items {
@@ -1198,7 +1172,7 @@ impl<'gc> Class<'gc> {
                 activation.context.gc_context,
                 Trait::from_const(
                     QName::new(namespace, name),
-                    Multiname::new(activation.avm2().public_namespace_base_version, "int"),
+                    Some(activation.avm2().multinames.int),
                     Some(value.into()),
                 ),
             );
@@ -1228,6 +1202,10 @@ impl<'gc> Class<'gc> {
         Ref::map(self.0.read(), |c| &c.traits)
     }
 
+    pub fn set_traits(&self, mc: &Mutation<'gc>, traits: Vec<Trait<'gc>>) {
+        self.0.write(mc).traits = traits;
+    }
+
     /// Get this class's instance allocator.
     ///
     /// If `None`, then you should use the instance allocator of the superclass
@@ -1241,19 +1219,21 @@ impl<'gc> Class<'gc> {
         self.0.write(mc).instance_allocator = Allocator(alloc);
     }
 
+    /// Get this class's custom constructor.
+    ///
+    /// If `None`, then this class should be constructed normally.
+    pub fn custom_constructor(self) -> Option<CustomConstructor> {
+        self.0.read().custom_constructor
+    }
+
+    /// Set this class's custom constructor.
+    pub fn set_custom_constructor(self, mc: &Mutation<'gc>, ctor: CustomConstructorFn) {
+        self.0.write(mc).custom_constructor = Some(CustomConstructor(ctor));
+    }
+
     /// Get this class's instance initializer.
     pub fn instance_init(self) -> Method<'gc> {
         self.0.read().instance_init
-    }
-
-    /// Get this class's native-code instance initializer.
-    pub fn native_instance_init(self) -> Method<'gc> {
-        self.0.read().native_instance_init
-    }
-
-    /// Set a native-code instance initializer for this class.
-    pub fn set_native_instance_init(self, mc: &Mutation<'gc>, new_native_init: Method<'gc>) {
-        self.0.write(mc).native_instance_init = new_native_init;
     }
 
     /// Set a call handler for this class.
@@ -1311,6 +1291,10 @@ impl<'gc> Class<'gc> {
         self.0.write(mc).linked_class = ClassLink::LinkToClass(c_class);
     }
 
+    pub fn is_c_class(self) -> bool {
+        matches!(self.0.read().linked_class, ClassLink::LinkToInstance(_))
+    }
+
     pub fn i_class(self) -> Option<Class<'gc>> {
         if let ClassLink::LinkToInstance(i_class) = self.0.read().linked_class {
             Some(i_class)
@@ -1323,5 +1307,9 @@ impl<'gc> Class<'gc> {
         assert!(matches!(self.0.read().linked_class, ClassLink::Unlinked));
 
         self.0.write(mc).linked_class = ClassLink::LinkToInstance(i_class);
+    }
+
+    pub fn is_i_class(self) -> bool {
+        matches!(self.0.read().linked_class, ClassLink::LinkToClass(_))
     }
 }

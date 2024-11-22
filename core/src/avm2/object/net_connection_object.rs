@@ -3,10 +3,9 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
-use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::net_connection::NetConnectionHandle;
-use gc_arena::{Collect, Gc, GcWeak, Mutation};
+use gc_arena::{Collect, Gc, GcWeak};
 use std::cell::Cell;
 use std::fmt;
 use std::fmt::Debug;
@@ -63,16 +62,12 @@ impl<'gc> TObject<'gc> for NetConnectionObject<'gc> {
         Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
-    }
-
     fn as_net_connection(self) -> Option<NetConnectionObject<'gc>> {
         Some(self)
     }
 }
 
-impl<'gc> NetConnectionObject<'gc> {
+impl NetConnectionObject<'_> {
     pub fn handle(&self) -> Option<NetConnectionHandle> {
         self.0.handle.get()
     }
@@ -82,7 +77,7 @@ impl<'gc> NetConnectionObject<'gc> {
     }
 }
 
-impl<'gc> Debug for NetConnectionObject<'gc> {
+impl Debug for NetConnectionObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "NetConnectionObject")
     }

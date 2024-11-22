@@ -15,13 +15,13 @@ use crate::avm1::globals::gradient_filter::GradientFilter;
 use crate::avm1::globals::local_connection::LocalConnection;
 use crate::avm1::globals::netconnection::NetConnection;
 use crate::avm1::globals::shared_object::SharedObject;
+use crate::avm1::globals::sound::Sound;
 use crate::avm1::globals::transform::TransformObject;
 use crate::avm1::globals::xml::Xml;
 use crate::avm1::globals::xml_socket::XmlSocket;
 use crate::avm1::object::array_object::ArrayObject;
 use crate::avm1::object::super_object::SuperObject;
-use crate::avm1::object::value_object::ValueObject;
-use crate::avm1::{Activation, Attribute, Error, ScriptObject, SoundObject, StageObject, Value};
+use crate::avm1::{Activation, Attribute, Error, ScriptObject, StageObject, Value};
 use crate::bitmap::bitmap_data::BitmapDataWrapper;
 use crate::display_object::DisplayObject;
 use crate::display_object::TDisplayObject;
@@ -35,17 +35,18 @@ use std::cell::{Cell, RefCell};
 use std::fmt::Debug;
 
 pub mod array_object;
-mod custom_object;
 pub mod script_object;
-pub mod sound_object;
 pub mod stage_object;
 pub mod super_object;
-pub mod value_object;
 
-#[derive(Clone, Collect)]
+#[derive(Copy, Clone, Collect)]
 #[collect(no_drop)]
 pub enum NativeObject<'gc> {
     None,
+    /// A boxed primitive.
+    ///
+    /// It is a logic error for a boxed value to be a `Value::Object`.
+    Value(Gc<'gc, Value<'gc>>),
     Date(Gc<'gc, Cell<Date>>),
     BlurFilter(BlurFilter<'gc>),
     BevelFilter(BevelFilter<'gc>),
@@ -68,6 +69,7 @@ pub enum NativeObject<'gc> {
     FileReference(FileReferenceObject<'gc>),
     NetConnection(NetConnection<'gc>),
     LocalConnection(LocalConnection<'gc>),
+    Sound(Sound<'gc>),
 }
 
 /// Represents an object that can be directly interacted with by the AVM
@@ -79,10 +81,8 @@ pub enum NativeObject<'gc> {
     pub enum Object<'gc> {
         ScriptObject(ScriptObject<'gc>),
         ArrayObject(ArrayObject<'gc>),
-        SoundObject(SoundObject<'gc>),
         StageObject(StageObject<'gc>),
         SuperObject(SuperObject<'gc>),
-        ValueObject(ValueObject<'gc>),
         FunctionObject(FunctionObject<'gc>),
     }
 )]
@@ -581,11 +581,6 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         None
     }
 
-    /// Get the underlying sound object, if it exists.
-    fn as_sound_object(&self) -> Option<SoundObject<'gc>> {
-        None
-    }
-
     /// Get the underlying stage object, if it exists.
     fn as_stage_object(&self) -> Option<StageObject<'gc>> {
         None
@@ -613,11 +608,6 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
             NativeObject::XmlNode(xml_node) => Some(xml_node),
             _ => None,
         }
-    }
-
-    /// Get the underlying `ValueObject`, if it exists.
-    fn as_value_object(&self) -> Option<ValueObject<'gc>> {
-        None
     }
 
     fn as_ptr(&self) -> *const ObjectPtr;

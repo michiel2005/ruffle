@@ -2,33 +2,17 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
+use crate::avm2::object::{ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::AvmString;
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::avm2::Namespace;
+use crate::string::StringContext;
 use core::fmt;
 use gc_arena::barrier::unlock;
 use gc_arena::{lock::RefLock, Collect, Gc, GcWeak, Mutation};
 use std::cell::Ref;
-
-/// A class instance allocator that allocates QName objects.
-pub fn q_name_allocator<'gc>(
-    class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<Object<'gc>, Error<'gc>> {
-    let base = ScriptObjectData::new(class);
-
-    Ok(QNameObject(Gc::new(
-        activation.context.gc_context,
-        QNameObjectData {
-            base,
-            name: RefLock::new(Multiname::any(activation.context.gc_context)),
-        },
-    ))
-    .into())
-}
 
 /// An Object which represents a boxed QName.
 #[derive(Collect, Clone, Copy)]
@@ -63,25 +47,30 @@ const _: () =
     assert!(std::mem::align_of::<QNameObjectData>() == std::mem::align_of::<ScriptObjectData>());
 
 impl<'gc> QNameObject<'gc> {
+    pub fn new_empty(activation: &mut Activation<'_, 'gc>) -> Self {
+        let base = ScriptObjectData::new(activation.avm2().classes().qname);
+
+        QNameObject(Gc::new(
+            activation.gc(),
+            QNameObjectData {
+                base,
+                name: RefLock::new(Multiname::any()),
+            },
+        ))
+    }
+
     /// Box a Multiname into an object.
-    pub fn from_name(
-        activation: &mut Activation<'_, 'gc>,
-        name: Multiname<'gc>,
-    ) -> Result<Object<'gc>, Error<'gc>> {
+    pub fn from_name(activation: &mut Activation<'_, 'gc>, name: Multiname<'gc>) -> Self {
         let class = activation.avm2().classes().qname;
         let base = ScriptObjectData::new(class);
 
-        let this: Object<'gc> = QNameObject(Gc::new(
-            activation.context.gc_context,
+        QNameObject(Gc::new(
+            activation.gc(),
             QNameObjectData {
                 base,
                 name: RefLock::new(name),
             },
         ))
-        .into();
-        this.install_instance_slots(activation.context.gc_context);
-
-        Ok(this)
     }
 
     pub fn name(&self) -> Ref<Multiname<'gc>> {
@@ -112,21 +101,23 @@ impl<'gc> QNameObject<'gc> {
         write_name.set_is_qname(is_qname);
     }
 
-    pub fn uri(&self) -> Option<AvmString<'gc>> {
+    pub fn uri(&self, context: &mut StringContext<'gc>) -> Option<AvmString<'gc>> {
         let name = self.0.name.borrow();
 
         if name.is_any_namespace() {
             None
         } else if name.namespace_set().len() > 1 {
-            Some("".into())
+            Some(context.empty())
         } else {
-            Some(
-                name.namespace_set()
-                    .first()
-                    .expect("Malformed multiname")
-                    .as_uri(),
-            )
+            name.namespace_set()
+                .first()
+                .expect("Malformed multiname")
+                .as_uri_opt()
         }
+    }
+
+    pub fn is_any_namespace(&self) -> bool {
+        self.0.name.borrow().is_any_namespace()
     }
 
     pub fn init_name(self, mc: &Mutation<'gc>, name: Multiname<'gc>) {
@@ -149,10 +140,6 @@ impl<'gc> TObject<'gc> for QNameObject<'gc> {
         Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
-    }
-
     fn as_qname_object(self) -> Option<QNameObject<'gc>> {
         Some(self)
     }
@@ -172,12 +159,15 @@ impl<'gc> TObject<'gc> for QNameObject<'gc> {
     fn get_enumerant_value(
         self,
         index: u32,
-        _activation: &mut Activation<'_, 'gc>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         // NOTE: Weird avmplus behavior, get_enumerant_name returns uri first, but get_enumerant_value returns localName first.
         Ok(match index {
             1 => self.local_name().into(),
-            2 => self.uri().map(Into::into).unwrap_or("".into()),
+            2 => self
+                .uri(activation.strings())
+                .unwrap_or_else(|| activation.strings().empty())
+                .into(),
             _ => Value::Undefined,
         })
     }

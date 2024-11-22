@@ -6,7 +6,7 @@ use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::regexp::{RegExp, RegExpFlags};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::string::{AvmString, WString};
+use crate::string::{AvmString, StringContext, WString};
 use core::fmt;
 use gc_arena::barrier::unlock;
 use gc_arena::{lock::RefLock, Collect, Gc, GcWeak, Mutation};
@@ -23,7 +23,7 @@ pub fn reg_exp_allocator<'gc>(
         activation.context.gc_context,
         RegExpObjectData {
             base,
-            regexp: RefLock::new(RegExp::new("")),
+            regexp: RefLock::new(RegExp::new(activation.strings().empty())),
         },
     ))
     .into())
@@ -75,9 +75,8 @@ impl<'gc> RegExpObject<'gc> {
             },
         ))
         .into();
-        this.install_instance_slots(activation.context.gc_context);
 
-        class.call_native_init(this.into(), &[], activation)?;
+        class.call_init(this.into(), &[], activation)?;
 
         Ok(this)
     }
@@ -96,7 +95,7 @@ impl<'gc> TObject<'gc> for RegExpObject<'gc> {
         Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
-    fn value_of(&self, mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
+    fn value_of(&self, context: &mut StringContext<'gc>) -> Result<Value<'gc>, Error<'gc>> {
         let regexp = self.0.regexp.borrow();
         let mut s = WString::new();
         s.push_byte(b'/');
@@ -121,7 +120,7 @@ impl<'gc> TObject<'gc> for RegExpObject<'gc> {
             s.push_byte(b'x');
         }
 
-        Ok(AvmString::new(mc, s).into())
+        Ok(AvmString::new(context.gc(), s).into())
     }
 
     /// Unwrap this object as a regexp.

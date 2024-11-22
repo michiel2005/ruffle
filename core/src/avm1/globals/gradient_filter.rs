@@ -6,8 +6,8 @@ use crate::avm1::globals::bevel_filter::BevelFilterType;
 use crate::avm1::object::NativeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Activation, ArrayObject, Error, Object, ScriptObject, TObject, Value};
-use crate::context::{GcContext, UpdateContext};
-use crate::string::{AvmString, WStr};
+use crate::context::UpdateContext;
+use crate::string::{AvmString, StringContext, WStr};
 use gc_arena::{Collect, GcCell, Mutation};
 use std::ops::Deref;
 use swf::{Color, Fixed16, Fixed8, GradientFilterFlags, GradientRecord};
@@ -102,7 +102,7 @@ impl GradientFilterData {
     }
 }
 
-#[derive(Clone, Debug, Collect)]
+#[derive(Copy, Clone, Debug, Collect)]
 #[collect(no_drop)]
 #[repr(transparent)]
 pub struct GradientFilter<'gc>(GcCell<'gc, GradientFilterData>);
@@ -167,7 +167,7 @@ impl<'gc> GradientFilter<'gc> {
         Ok(())
     }
 
-    fn colors(&self, context: &mut UpdateContext<'_, 'gc>) -> ArrayObject<'gc> {
+    fn colors(&self, context: &mut UpdateContext<'gc>) -> ArrayObject<'gc> {
         let read = self.0.read();
         ArrayObject::new(
             context.gc_context,
@@ -205,7 +205,7 @@ impl<'gc> GradientFilter<'gc> {
         Ok(())
     }
 
-    fn alphas(&self, context: &mut UpdateContext<'_, 'gc>) -> ArrayObject<'gc> {
+    fn alphas(&self, context: &mut UpdateContext<'gc>) -> ArrayObject<'gc> {
         let read = self.0.read();
         ArrayObject::new(
             context.gc_context,
@@ -245,7 +245,7 @@ impl<'gc> GradientFilter<'gc> {
         Ok(())
     }
 
-    fn ratios(&self, context: &mut UpdateContext<'_, 'gc>) -> ArrayObject<'gc> {
+    fn ratios(&self, context: &mut UpdateContext<'gc>) -> ArrayObject<'gc> {
         let read = self.0.read();
         ArrayObject::new(
             context.gc_context,
@@ -467,17 +467,17 @@ fn method<'gc>(
             this.set_angle(activation, args.get(0))?;
             Value::Undefined
         }
-        GET_COLORS => this.colors(&mut activation.context).into(),
+        GET_COLORS => this.colors(activation.context).into(),
         SET_COLORS => {
             this.set_colors(activation, args.get(0))?;
             Value::Undefined
         }
-        GET_ALPHAS => this.alphas(&mut activation.context).into(),
+        GET_ALPHAS => this.alphas(activation.context).into(),
         SET_ALPHAS => {
             this.set_alphas(activation, args.get(0))?;
             Value::Undefined
         }
-        GET_RATIOS => this.ratios(&mut activation.context).into(),
+        GET_RATIOS => this.ratios(activation.context).into(),
         SET_RATIOS => {
             this.set_ratios(activation, args.get(0))?;
             Value::Undefined
@@ -520,7 +520,7 @@ fn method<'gc>(
 }
 
 pub fn create_bevel_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
@@ -530,7 +530,7 @@ pub fn create_bevel_proto<'gc>(
 }
 
 pub fn create_bevel_constructor<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
@@ -544,7 +544,7 @@ pub fn create_bevel_constructor<'gc>(
 }
 
 pub fn create_glow_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
@@ -554,7 +554,7 @@ pub fn create_glow_proto<'gc>(
 }
 
 pub fn create_glow_constructor<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {

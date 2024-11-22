@@ -1,14 +1,14 @@
 //! `String` class impl
 
+use gc_arena::Gc;
+
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{Executable, FunctionObject};
-use crate::avm1::object::value_object::ValueObject;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{ArrayObject, Object, TObject, Value};
-use crate::context::GcContext;
-use crate::string::{utils as string_utils, AvmString, WString};
+use crate::avm1::{ArrayObject, NativeObject, Object, ScriptObject, TObject, Value};
+use crate::string::{utils as string_utils, AvmString, StringContext, WString};
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "toString" => method(to_string_value_of; DONT_ENUM | DONT_DELETE);
@@ -39,19 +39,19 @@ pub fn string<'gc>(
     let value = match args.get(0).cloned() {
         Some(Value::String(s)) => s,
         Some(v) => v.coerce_to_string(activation)?,
-        _ => AvmString::default(),
+        None => activation.strings().empty(),
     };
 
-    if let Some(mut vbox) = this.as_value_object() {
-        let len = value.len();
-        vbox.define_value(
-            activation.context.gc_context,
-            "length",
-            len.into(),
-            Attribute::empty(),
-        );
-        vbox.replace_value(activation.context.gc_context, value.into());
-    }
+    // Called from a constructor, populate `this`.
+    let vbox = Gc::new(activation.gc(), value.into());
+    this.set_native(activation.gc(), NativeObject::Value(vbox));
+
+    this.define_value(
+        activation.gc(),
+        "length",
+        value.len().into(),
+        Attribute::empty(),
+    );
 
     Ok(this.into())
 }
@@ -65,14 +65,14 @@ pub fn string_function<'gc>(
     let value = match args.get(0).cloned() {
         Some(Value::String(s)) => s,
         Some(v) => v.coerce_to_string(activation)?,
-        _ => AvmString::new_utf8(activation.context.gc_context, String::new()),
+        None => activation.strings().empty(),
     };
 
     Ok(value.into())
 }
 
 pub fn create_string_object<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     string_proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
@@ -90,14 +90,13 @@ pub fn create_string_object<'gc>(
 
 /// Creates `String.prototype`.
 pub fn create_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let string_proto = ValueObject::empty_box(context.gc_context, proto);
-    let object = string_proto.raw_script_object();
-    define_properties_on(PROTO_DECLS, context, object, fn_proto);
-    string_proto
+    let string_proto = ScriptObject::new(context.gc(), Some(proto));
+    define_properties_on(PROTO_DECLS, context, string_proto, fn_proto);
+    string_proto.into()
 }
 
 fn char_at<'gc>(
@@ -117,7 +116,7 @@ fn char_at<'gc>(
         .and_then(|i| string.get(i))
         .map(WString::from_unit)
         .map(|ret| AvmString::new(activation.context.gc_context, ret))
-        .unwrap_or_else(|| "".into());
+        .unwrap_or_else(|| activation.strings().empty());
 
     Ok(ret.into())
 }
@@ -251,7 +250,7 @@ fn slice<'gc>(
         let ret = WString::from(&this[start_index..end_index]);
         Ok(AvmString::new(activation.context.gc_context, ret).into())
     } else {
-        Ok("".into())
+        Ok(activation.strings().empty().into())
     }
 }
 
@@ -333,7 +332,7 @@ fn substr<'gc>(
         let ret = WString::from(&this[start_index..end_index]);
         Ok(AvmString::new(activation.context.gc_context, ret).into())
     } else {
-        Ok("".into())
+        Ok(activation.strings().empty().into())
     }
 }
 
@@ -385,8 +384,8 @@ pub fn to_string_value_of<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(vbox) = this.as_value_object() {
-        if let Value::String(s) = vbox.unbox() {
+    if let NativeObject::Value(vbox) = this.native() {
+        if let Value::String(s) = *vbox {
             return Ok(s.into());
         }
     }

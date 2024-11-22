@@ -1,19 +1,18 @@
 use crate::external_interface::JavascriptInterface;
-use crate::navigator::WebNavigatorBackend;
+use crate::navigator::{OpenUrlMode, WebNavigatorBackend};
 use crate::{
     audio, log_adapter, storage, ui, JavascriptPlayer, RuffleHandle, SocketProxy,
     RUFFLE_GLOBAL_PANIC,
 };
 use js_sys::Promise;
 use ruffle_core::backend::audio::{AudioBackend, NullAudioBackend};
-use ruffle_core::backend::navigator::OpenURLMode;
 use ruffle_core::backend::storage::{MemoryStorageBackend, StorageBackend};
 use ruffle_core::backend::ui::FontDefinition;
 use ruffle_core::compatibility_rules::CompatibilityRules;
 use ruffle_core::config::{Letterbox, NetworkingAccessMode};
+use ruffle_core::ttf_parser;
 use ruffle_core::{
-    swf, Color, DefaultFont, Player, PlayerBuilder, PlayerRuntime, SandboxType, StageAlign,
-    StageScaleMode,
+    swf, Color, DefaultFont, Player, PlayerBuilder, PlayerRuntime, StageAlign, StageScaleMode,
 };
 use ruffle_render::backend::RenderBackend;
 use ruffle_render::quality::StageQuality;
@@ -54,7 +53,7 @@ pub struct RuffleInstanceBuilder {
     pub(crate) max_execution_duration: Duration,
     pub(crate) player_version: Option<u8>,
     pub(crate) preferred_renderer: Option<String>, // TODO: Enumify?
-    pub(crate) open_url_mode: OpenURLMode,
+    pub(crate) open_url_mode: OpenUrlMode,
     pub(crate) allow_networking: NetworkingAccessMode,
     pub(crate) socket_proxy: Vec<SocketProxy>,
     pub(crate) credential_allow_list: Vec<String>,
@@ -90,7 +89,7 @@ impl Default for RuffleInstanceBuilder {
             max_execution_duration: Duration::from_secs_f64(15.0),
             player_version: None,
             preferred_renderer: None,
-            open_url_mode: OpenURLMode::Allow,
+            open_url_mode: OpenUrlMode::Allow,
             allow_networking: NetworkingAccessMode::All,
             socket_proxy: vec![],
             credential_allow_list: vec![],
@@ -248,9 +247,9 @@ impl RuffleInstanceBuilder {
     #[wasm_bindgen(js_name = "setOpenUrlMode")]
     pub fn set_open_url_mode(&mut self, value: &str) {
         self.open_url_mode = match value {
-            "allow" => OpenURLMode::Allow,
-            "confirm" => OpenURLMode::Confirm,
-            "deny" => OpenURLMode::Deny,
+            "allow" => OpenUrlMode::Allow,
+            "confirm" => OpenUrlMode::Confirm,
+            "deny" => OpenUrlMode::Deny,
             _ => return,
         };
     }
@@ -340,51 +339,106 @@ impl RuffleInstanceBuilder {
 impl RuffleInstanceBuilder {
     pub fn setup_fonts(&self, player: &mut Player) {
         for (font_name, bytes) in &self.custom_fonts {
-            if let Ok(swf_stream) = swf::decompress_swf(&bytes[..]) {
-                if let Ok(swf) = swf::parse_swf(&swf_stream) {
-                    let encoding = swf::SwfStr::encoding_for_version(swf.header.version());
-                    for tag in swf.tags {
-                        match tag {
-                            swf::Tag::DefineFont(_font) => {
-                                tracing::warn!("DefineFont1 tag is not yet supported by Ruffle, inside font swf {font_name}");
-                            }
-                            swf::Tag::DefineFont2(font) => {
-                                tracing::debug!(
-                                    "Loaded font {} from font swf {font_name}",
-                                    font.name.to_str_lossy(encoding)
-                                );
-                                player
-                                    .register_device_font(FontDefinition::SwfTag(*font, encoding));
-                            }
-                            swf::Tag::DefineFont4(font) => {
-                                let name = font.name.to_str_lossy(encoding);
-                                if let Some(data) = font.data {
-                                    tracing::debug!("Loaded font {name} from font swf {font_name}");
-                                    player.register_device_font(FontDefinition::FontFile {
-                                        name: name.to_string(),
-                                        is_bold: font.is_bold,
-                                        is_italic: font.is_italic,
-                                        data: data.to_vec(),
-                                        index: 0,
-                                    })
-                                } else {
-                                    tracing::warn!(
-                                        "Font {name} from font swf {font_name} contains no data"
-                                    );
-                                }
-                            }
-                            _ => {}
-                        }
+            let bytes_slice = &bytes[..];
+            if let Ok(face) = ttf_parser::Face::parse(bytes_slice, 0) {
+                tracing::debug!("Loading font {font_name} as TTF/OTF/TTC/OTC font");
+
+                // Check if font collection
+                let number_of_fonts = ttf_parser::fonts_in_collection(bytes_slice).unwrap_or(1u32);
+
+                Self::register_ttf_face_by_name(font_name, bytes.clone(), face, 0, player);
+
+                // Register all remaining fonts in the collection if it is a collection
+                for i in 1u32..number_of_fonts {
+                    if let Ok(face) = ttf_parser::Face::parse(bytes_slice, i) {
+                        Self::register_ttf_face_by_name(font_name, bytes.clone(), face, i, player);
+                    } else {
+                        tracing::warn!(
+                            "Failed to parse font {font_name} at index {i} in font collection"
+                        );
                     }
-                    continue;
                 }
+            } else {
+                tracing::debug!("Loading font {font_name} as SWF font");
+                if let Ok(swf_stream) = swf::decompress_swf(&bytes[..]) {
+                    if let Ok(swf) = swf::parse_swf(&swf_stream) {
+                        let encoding = swf::SwfStr::encoding_for_version(swf.header.version());
+                        for tag in swf.tags {
+                            match tag {
+                                swf::Tag::DefineFont(_font) => {
+                                    tracing::warn!("DefineFont1 tag is not yet supported by Ruffle, inside font swf {font_name}");
+                                }
+                                swf::Tag::DefineFont2(font) => {
+                                    tracing::debug!(
+                                        "Loaded font {} from font swf {font_name}",
+                                        font.name.to_str_lossy(encoding)
+                                    );
+                                    player.register_device_font(FontDefinition::SwfTag(
+                                        *font, encoding,
+                                    ));
+                                }
+                                swf::Tag::DefineFont4(font) => {
+                                    let name = font.name.to_str_lossy(encoding);
+                                    if let Some(data) = font.data {
+                                        tracing::debug!(
+                                            "Loaded font {name} from font swf {font_name}"
+                                        );
+                                        player.register_device_font(FontDefinition::FontFile {
+                                            name: name.to_string(),
+                                            is_bold: font.is_bold,
+                                            is_italic: font.is_italic,
+                                            data: data.to_vec(),
+                                            index: 0,
+                                        })
+                                    } else {
+                                        tracing::warn!(
+                                            "Font {name} from font swf {font_name} contains no data"
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                }
+                tracing::warn!("Font source {font_name} was not recognised (not a valid SWF?)");
             }
-            tracing::warn!("Font source {font_name} was not recognised (not a valid SWF?)");
         }
 
         for (default, names) in &self.default_fonts {
             player.set_default_font(*default, names.clone());
         }
+    }
+
+    #[inline]
+    fn register_ttf_face_by_name(
+        url: &String,
+        bytes: Vec<u8>,
+        face: ttf_parser::Face<'_>,
+        index: u32,
+        player: &mut Player,
+    ) {
+        let full_name = face
+            .names()
+            .into_iter()
+            .find(|name| name.name_id == ttf_parser::name_id::FULL_NAME)
+            .and_then(|name| name.to_string());
+
+        let name = if let Some(full_name) = full_name {
+            full_name
+        } else {
+            tracing::warn!("Font {url} at index {index} has no full name, using URL as font name");
+            url.to_string()
+        };
+
+        player.register_device_font(FontDefinition::FontFile {
+            name: name.to_string(),
+            is_bold: face.is_bold(),
+            is_italic: face.is_italic(),
+            data: bytes,
+            index,
+        });
     }
 
     pub fn create_log_subscriber(&self) -> Arc<Layered<WASMLayer, Registry>> {
@@ -602,8 +656,6 @@ impl RuffleInstanceBuilder {
             .with_align(self.stage_align, self.force_align)
             .with_scale_mode(self.scale, self.force_scale)
             .with_frame_rate(self.frame_rate)
-            // FIXME - should this be configurable?
-            .with_sandbox_type(SandboxType::Remote)
             .with_page_url(window.location().href().ok())
             .build();
 

@@ -3,7 +3,7 @@ use crate::avm1::error::Error;
 use crate::avm1::object::Object;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{ScriptObject, Value};
-use crate::context::GcContext;
+use crate::string::StringContext;
 
 use rand::Rng;
 use std::f64::consts;
@@ -162,7 +162,7 @@ pub fn random<'gc>(
 }
 
 pub fn create<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
@@ -179,11 +179,7 @@ mod tests {
     fn setup<'gc>(activation: &mut Activation<'_, 'gc>) -> Object<'gc> {
         let object_proto = activation.context.avm1.prototypes().object;
         let function_proto = activation.context.avm1.prototypes().function;
-        create(
-            &mut activation.context.borrow_gc(),
-            object_proto,
-            function_proto,
-        )
+        create(activation.strings(), object_proto, function_proto)
     }
 
     test_method!(test_abs, "abs", setup,
@@ -199,9 +195,10 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [-1.0] => f64::acos(-1.0),
             [0.0] => f64::acos(0.0),
-            [1.0] => f64::acos(1.0)
+            [1.0] => 0.0 // f64::acos(1.0)
         }
     );
 
@@ -209,8 +206,9 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [-1.0] => f64::asin(-1.0),
-            [0.0] => f64::asin(0.0),
+            [0.0] => 0.0, // f64::asin(0.0),
             [1.0] => f64::asin(1.0)
         }
     );
@@ -219,8 +217,9 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [-1.0] => f64::atan(-1.0),
-            [0.0] => f64::atan(0.0),
+            [0.0] => 0.0, // f64::atan(0.0),
             [1.0] => f64::atan(1.0)
         }
     );
@@ -238,7 +237,7 @@ mod tests {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
             [0.0] => 1.0,
-            [std::f64::consts::PI] => f64::cos(std::f64::consts::PI)
+            [std::f64::consts::PI] => -1.0 // f64::cos(std::f64::consts::PI)
         }
     );
 
@@ -246,8 +245,8 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
-            [1.0] => f64::exp(1.0),
-            [2.0] => f64::exp(2.0)
+            @epsilon(1e-12) [1.0] => f64::from_bits(0x4005bf0a8b145769), // f64::exp(1.0), e, 2.718281828459045
+            @epsilon(1e-12) [2.0] => f64::from_bits(0x401d8e64b8d4ddae)  // f64::exp(2.0), e^2, 7.3890560989306495
         }
     );
 
@@ -298,8 +297,8 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
-            [0.0] => f64::sin(0.0),
-            [std::f64::consts::PI / 2.0] => f64::sin(std::f64::consts::PI / 2.0)
+            [0.0] => 0.0, // f64::sin(0.0),
+            [std::f64::consts::PI / 2.0] => 1.0 // f64::sin(std::f64::consts::PI / 2.0)
         }
     );
 
@@ -307,7 +306,8 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
-            [0.0] => f64::sqrt(0.0),
+            [0.0] => 0.0, // f64::sqrt(0.0),
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [5.0] => f64::sqrt(5.0)
         }
     );
@@ -316,7 +316,8 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
-            [0.0] => f64::tan(0.0),
+            [0.0] => 0.0, // f64::tan(0.0),
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [1.0] => f64::tan(1.0)
         }
     );
@@ -346,9 +347,10 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [2.0] => f64::ln(2.0),
-            [0.0] => f64::ln(0.0),
-            [1.0] => f64::ln(1.0)
+            [0.0] => f64::NEG_INFINITY, // f64::ln(0.0),
+            [1.0] => 0 // f64::ln(1.0)
         }
     );
 

@@ -1,47 +1,47 @@
 use core::fmt;
-use std::borrow::{Borrow, Cow};
+use std::borrow::Borrow;
 use std::cell::Cell;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::marker::PhantomData;
-use std::ops::DerefMut;
+use std::ops::{Deref, DerefMut};
 
 use gc_arena::{Collect, Gc, GcWeak, Mutation};
 use hashbrown::HashSet;
 
-use crate::string::{AvmString, AvmStringRepr, WStr, WString};
+use crate::string::{AvmString, AvmStringRepr, WStr};
 
 // An interned `AvmString`, with fast by-pointer equality and hashing.
 #[derive(Copy, Clone, Collect)]
 #[collect(no_drop)]
 pub struct AvmAtom<'gc>(pub(super) Gc<'gc, AvmStringRepr<'gc>>);
 
-impl<'gc> PartialEq for AvmAtom<'gc> {
+impl PartialEq for AvmAtom<'_> {
     fn eq(&self, other: &Self) -> bool {
         Gc::ptr_eq(self.0, other.0)
     }
 }
 
-impl<'gc> Eq for AvmAtom<'gc> {}
+impl Eq for AvmAtom<'_> {}
 
-impl<'gc> Hash for AvmAtom<'gc> {
+impl Hash for AvmAtom<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Gc::as_ptr(self.0).hash(state);
     }
 }
 
-impl<'gc> fmt::Debug for AvmAtom<'gc> {
+impl fmt::Debug for AvmAtom<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self.as_wstr(), f)
     }
 }
 
-impl<'gc> fmt::Display for AvmAtom<'gc> {
+impl fmt::Display for AvmAtom<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self.as_wstr(), f)
     }
 }
 
-impl<'gc> AvmAtom<'gc> {
+impl AvmAtom<'_> {
     pub fn as_wstr(&self) -> &WStr {
         &self.0
     }
@@ -52,92 +52,64 @@ impl<'gc> AvmAtom<'gc> {
 pub struct AvmStringInterner<'gc> {
     interned: WeakSet<'gc, AvmStringRepr<'gc>>,
 
-    empty: Gc<'gc, AvmStringRepr<'gc>>,
-    chars: [Gc<'gc, AvmStringRepr<'gc>>; 128],
+    pub(super) empty: Gc<'gc, AvmStringRepr<'gc>>,
+    pub(super) chars: [Gc<'gc, AvmStringRepr<'gc>>; INTERNED_CHAR_LEN],
 }
+
+const INTERNED_CHAR_LEN: usize = 128;
+static INTERNED_CHARS: [u8; INTERNED_CHAR_LEN] = {
+    let mut chs = [0; INTERNED_CHAR_LEN];
+    let mut i = 0;
+    while i < chs.len() {
+        chs[i] = i as u8;
+        i += 1;
+    }
+    chs
+};
 
 impl<'gc> AvmStringInterner<'gc> {
     pub fn new(mc: &Mutation<'gc>) -> Self {
         let mut interned = WeakSet::default();
 
-        let mut intern_from_static = |s: &[u8]| {
-            let ch = Self::alloc(mc, Cow::Borrowed(WStr::from_units(s)));
-            interned.insert_fresh_no_hash(mc, ch)
+        // We can't use `Self::intern_static` because we don't have a Self yet.
+        let mut intern_from_static = |s: &'static [u8]| {
+            let wstr = WStr::from_units(s);
+            let repr = AvmStringRepr::from_raw_static(wstr, true);
+            interned.insert_fresh_no_hash(mc, Gc::new(mc, repr))
         };
-
-        let empty = intern_from_static(b"");
-
-        let mut chars = [empty; 128];
-        for (i, elem) in chars.iter_mut().enumerate() {
-            *elem = intern_from_static(&[i as u8]);
-        }
 
         Self {
+            empty: intern_from_static(b""),
+            chars: std::array::from_fn(|i| {
+                let c = &INTERNED_CHARS[i];
+                intern_from_static(std::slice::from_ref(c))
+            }),
             interned,
-            empty,
-            chars,
         }
     }
 
-    fn alloc(mc: &Mutation<'gc>, s: Cow<'_, WStr>) -> Gc<'gc, AvmStringRepr<'gc>> {
-        // note: the string is already marked as interned
-        let repr = AvmStringRepr::from_raw(s.into_owned(), true);
-        Gc::new(mc, repr)
-    }
-
-    #[must_use]
-    pub fn intern_wstr<'a, S>(&mut self, mc: &Mutation<'gc>, s: S) -> AvmAtom<'gc>
+    /// The string returned by `f` should be interned, and equivalent to `s`.
+    pub(super) fn intern_inner<S, F>(&mut self, mc: &Mutation<'gc>, s: S, f: F) -> AvmAtom<'gc>
     where
-        S: Into<Cow<'a, WStr>>,
+        S: Deref<Target = WStr>,
+        F: FnOnce(S) -> Gc<'gc, AvmStringRepr<'gc>>,
     {
-        let s = s.into();
-        let atom = match self.interned.entry(mc, s.as_ref()) {
-            (Some(atom), _) => atom,
-            (None, h) => self.interned.insert_fresh(mc, h, Self::alloc(mc, s)),
-        };
-
-        AvmAtom(atom)
+        match self.interned.entry(mc, s.deref()) {
+            (Some(atom), _) => AvmAtom(atom),
+            (None, h) => {
+                let atom = self.interned.insert_fresh(mc, h, f(s));
+                AvmAtom(atom)
+            }
+        }
     }
 
     #[must_use]
-    pub fn get(&self, mc: &Mutation<'gc>, s: &WStr) -> Option<AvmAtom<'gc>> {
+    pub(super) fn get(&self, mc: &Mutation<'gc>, s: &WStr) -> Option<AvmAtom<'gc>> {
         self.interned.get(mc, s).map(AvmAtom)
     }
 
     #[must_use]
-    pub fn intern(&mut self, mc: &Mutation<'gc>, s: AvmString<'gc>) -> AvmAtom<'gc> {
-        if let Some(atom) = s.as_interned() {
-            return atom;
-        }
-
-        let atom = match self.interned.entry(mc, s.as_wstr()) {
-            (Some(atom), _) => atom,
-            (None, h) => {
-                let repr = s.to_fully_owned(mc);
-                repr.mark_interned();
-                self.interned.insert_fresh(mc, h, repr)
-            }
-        };
-
-        AvmAtom(atom)
-    }
-
-    #[must_use]
-    pub fn empty(&self) -> AvmString<'gc> {
-        self.empty.into()
-    }
-
-    #[must_use]
-    pub fn get_char(&self, mc: &Mutation<'gc>, c: u16) -> AvmString<'gc> {
-        if let Some(s) = self.chars.get(c as usize) {
-            (*s).into()
-        } else {
-            AvmString::new(mc, WString::from_unit(c))
-        }
-    }
-
-    #[must_use]
-    pub fn substring(
+    pub(super) fn substring(
         &self,
         mc: &Mutation<'gc>,
         s: AvmString<'gc>,
@@ -280,7 +252,7 @@ impl<'gc, T: Hash + 'gc> WeakSet<'gc, T> {
     }
 }
 
-unsafe impl<'gc, T> Collect for WeakSet<'gc, T> {
+unsafe impl<T> Collect for WeakSet<'_, T> {
     fn trace(&self, cc: &gc_arena::Collection) {
         // Prune entries known to be dead.
         // Safe, as we never pick up new GC pointers from outside this allocation.

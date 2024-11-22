@@ -2,37 +2,13 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
+use crate::avm2::object::{ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::Namespace;
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 use core::fmt;
-use gc_arena::barrier::unlock;
-use gc_arena::{lock::Lock, Collect, Gc, GcWeak, Mutation};
-
-/// A class instance allocator that allocates namespace objects.
-pub fn namespace_allocator<'gc>(
-    class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<Object<'gc>, Error<'gc>> {
-    let base = ScriptObjectData::new(class);
-
-    let namespace = activation.context.avm2.public_namespace_base_version;
-    Ok(NamespaceObject(Gc::new(
-        activation.context.gc_context,
-        NamespaceObjectData {
-            base,
-            namespace: Lock::new(namespace),
-            prefix: Lock::new(if namespace.as_uri().is_empty() {
-                Some("".into())
-            } else {
-                None
-            }),
-        },
-    ))
-    .into())
-}
+use gc_arena::{Collect, Gc, GcWeak};
 
 /// An Object which represents a boxed namespace name.
 #[derive(Collect, Clone, Copy)]
@@ -59,10 +35,10 @@ pub struct NamespaceObjectData<'gc> {
     base: ScriptObjectData<'gc>,
 
     /// The namespace name this object is associated with.
-    namespace: Lock<Namespace<'gc>>,
+    namespace: Namespace<'gc>,
 
     /// The prefix that this namespace has been given.
-    prefix: Lock<Option<AvmString<'gc>>>,
+    prefix: Option<AvmString<'gc>>,
 }
 
 const _: () = assert!(std::mem::offset_of!(NamespaceObjectData, base) == 0);
@@ -71,48 +47,49 @@ const _: () = assert!(
 );
 
 impl<'gc> NamespaceObject<'gc> {
-    /// Box a namespace into an object.
-    pub fn from_namespace(
+    pub fn from_ns_and_prefix(
         activation: &mut Activation<'_, 'gc>,
         namespace: Namespace<'gc>,
-    ) -> Result<Object<'gc>, Error<'gc>> {
+        prefix: Option<AvmString<'gc>>,
+    ) -> Self {
         let class = activation.avm2().classes().namespace;
         let base = ScriptObjectData::new(class);
 
-        let this: Object<'gc> = NamespaceObject(Gc::new(
+        NamespaceObject(Gc::new(
             activation.context.gc_context,
             NamespaceObjectData {
                 base,
-                namespace: Lock::new(namespace),
-                prefix: Lock::new(if namespace.as_uri().is_empty() {
-                    Some("".into())
-                } else {
-                    None
-                }),
+                namespace,
+                prefix,
             },
         ))
-        .into();
-        this.install_instance_slots(activation.context.gc_context);
+    }
 
-        class.call_native_init(this.into(), &[], activation)?;
+    /// Box a namespace into an object.
+    pub fn from_namespace(activation: &mut Activation<'_, 'gc>, namespace: Namespace<'gc>) -> Self {
+        let class = activation.avm2().classes().namespace;
+        let base = ScriptObjectData::new(class);
 
-        Ok(this)
+        NamespaceObject(Gc::new(
+            activation.context.gc_context,
+            NamespaceObjectData {
+                base,
+                namespace,
+                prefix: if namespace.as_uri(activation.strings()).is_empty() {
+                    Some(activation.strings().empty())
+                } else {
+                    None
+                },
+            },
+        ))
     }
 
     pub fn namespace(self) -> Namespace<'gc> {
-        self.0.namespace.get()
-    }
-
-    pub fn init_namespace(&self, mc: &Mutation<'gc>, namespace: Namespace<'gc>) {
-        unlock!(Gc::write(mc, self.0), NamespaceObjectData, namespace).set(namespace);
+        self.0.namespace
     }
 
     pub fn prefix(&self) -> Option<AvmString<'gc>> {
-        self.0.prefix.get()
-    }
-
-    pub fn set_prefix(&self, mc: &Mutation<'gc>, prefix: Option<AvmString<'gc>>) {
-        unlock!(Gc::write(mc, self.0), NamespaceObjectData, prefix).set(prefix);
+        self.0.prefix
     }
 }
 
@@ -129,12 +106,12 @@ impl<'gc> TObject<'gc> for NamespaceObject<'gc> {
         Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(self.0.namespace.get().as_uri().into())
+    fn value_of(&self, context: &mut StringContext<'gc>) -> Result<Value<'gc>, Error<'gc>> {
+        Ok(self.0.namespace.as_uri(context).into())
     }
 
     fn as_namespace(&self) -> Option<Namespace<'gc>> {
-        Some(self.0.namespace.get())
+        Some(self.0.namespace)
     }
 
     fn as_namespace_object(&self) -> Option<Self> {
@@ -160,10 +137,10 @@ impl<'gc> TObject<'gc> for NamespaceObject<'gc> {
     fn get_enumerant_value(
         self,
         index: u32,
-        _activation: &mut Activation<'_, 'gc>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         Ok(match index {
-            1 => self.namespace().as_uri().into(),
+            1 => self.namespace().as_uri(activation.strings()).into(),
             2 => self.prefix().map(Into::into).unwrap_or(Value::Undefined),
             _ => Value::Undefined,
         })

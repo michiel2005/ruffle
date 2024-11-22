@@ -4,7 +4,6 @@ use crate::avm2::activation::Activation;
 use crate::avm2::domain::Domain;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
-use crate::avm2::value::Value;
 use crate::avm2::Error;
 use core::fmt;
 use gc_arena::barrier::unlock;
@@ -78,14 +77,13 @@ impl<'gc> DomainObject<'gc> {
             },
         ))
         .into();
-        this.install_instance_slots(activation.context.gc_context);
 
         // Note - we do *not* call the normal constructor, since that
         // creates a new domain using the system domain as a parent.
         class
             .superclass_object()
             .unwrap()
-            .call_native_init(this.into(), &[], activation)?;
+            .call_init(this.into(), &[], activation)?;
         Ok(this)
     }
 }
@@ -109,11 +107,5 @@ impl<'gc> TObject<'gc> for DomainObject<'gc> {
 
     fn init_application_domain(&self, mc: &Mutation<'gc>, domain: Domain<'gc>) {
         unlock!(Gc::write(mc, self.0), DomainObjectData, domain).set(domain);
-    }
-
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        let this: Object<'gc> = Object::DomainObject(*self);
-
-        Ok(this.into())
     }
 }

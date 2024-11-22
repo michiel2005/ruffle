@@ -148,10 +148,7 @@ package flash.text {
 
         public native function getLineOffset(lineIndex:int):int;
 
-        public function getCharBoundaries(charIndex:int):Rectangle {
-            stub_method("flash.text.TextField", "getCharBoundaries");
-            return new Rectangle(0, 0, 1, 1);
-        }
+        public native function getCharBoundaries(charIndex:int):Rectangle;
 
         public native function getFirstCharInParagraph(charIndex:int):int;
 
@@ -171,6 +168,7 @@ package flash.text {
             return true;
         }
 
+        [API("670")]
         public function get textInteractionMode():String {
             stub_getter("flash.text.TextField", "textInteractionMode");
             return TextInteractionMode.NORMAL;

@@ -4,7 +4,7 @@
 #![allow(clippy::doc_lazy_continuation)]
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{make_error_2004, make_error_2008, Error2004Type};
+use crate::avm2::error::{make_error_2004, make_error_2007, make_error_2008, Error2004Type};
 use crate::avm2::globals::flash::geom::transform::object_to_matrix;
 use crate::avm2::object::{Object, TObject, VectorObject};
 use crate::avm2::parameters::ParametersExt;
@@ -103,14 +103,16 @@ pub fn begin_gradient_fill<'gc>(
         let gradient_type = args.get_string(activation, 0)?;
         let gradient_type = parse_gradient_type(activation, gradient_type)?;
         let colors = args.get_object(activation, 1, "colors")?;
-        let alphas = args.get_object(activation, 2, "alphas")?;
-        let ratios = args.get_object(activation, 3, "ratios")?;
+        let alphas = args.try_get_object(activation, 2);
+        let ratios = args.try_get_object(activation, 3);
+
         let records = build_gradient_records(
             activation,
             &colors.as_array_storage().expect("Guaranteed by AS"),
-            &alphas.as_array_storage().expect("Guaranteed by AS"),
-            &ratios.as_array_storage().expect("Guaranteed by AS"),
+            alphas,
+            ratios,
         )?;
+
         let matrix = if let Some(matrix) = args.try_get_object(activation, 4) {
             Matrix::from(object_to_matrix(matrix, activation)?)
         } else {
@@ -159,26 +161,49 @@ pub fn begin_gradient_fill<'gc>(
 fn build_gradient_records<'gc>(
     activation: &mut Activation<'_, 'gc>,
     colors: &ArrayStorage<'gc>,
-    alphas: &ArrayStorage<'gc>,
-    ratios: &ArrayStorage<'gc>,
+    alphas: Option<Object<'gc>>,
+    ratios: Option<Object<'gc>>,
 ) -> Result<Vec<GradientRecord>, Error<'gc>> {
-    let length = colors.length().min(alphas.length()).min(ratios.length());
+    let alphas = alphas.as_ref().map(|o| o.as_array_storage().unwrap());
+    let ratios = ratios.as_ref().map(|o| o.as_array_storage().unwrap());
+
+    let mut length = colors.length();
+    if let Some(ref alphas) = alphas {
+        length = length.min(alphas.length());
+    }
+    if let Some(ref ratios) = ratios {
+        length = length.min(ratios.length());
+    }
+
     let mut records = Vec::with_capacity(length);
     for i in 0..length {
         let color = colors
             .get(i)
             .expect("Length should be guaranteed")
             .coerce_to_u32(activation)?;
-        let alpha = alphas
-            .get(i)
-            .expect("Length should be guaranteed")
-            .coerce_to_number(activation)? as f32;
-        let ratio = ratios
-            .get(i)
-            .expect("Length should be guaranteed")
-            .coerce_to_u32(activation)?;
+
+        let alpha = if let Some(ref alphas) = alphas {
+            alphas
+                .get(i)
+                .expect("Length should be guaranteed")
+                .coerce_to_number(activation)? as f32
+        } else {
+            1.0
+        };
+
+        let ratio = if let Some(ref ratios) = ratios {
+            let ratio = ratios
+                .get(i)
+                .expect("Length should be guaranteed")
+                .coerce_to_u32(activation)?;
+            ratio.clamp(0, 255) as u8
+        } else {
+            // For example, with length=3: 0/2, 1/2, 2/2.
+            ((i * 255) / (length - 1)) as u8
+        };
+
         records.push(GradientRecord {
-            ratio: ratio.clamp(0, 255) as u8,
+            ratio,
             color: Color::from_rgb(color, (alpha * 255.0) as u8),
         })
     }
@@ -416,58 +441,58 @@ pub fn draw_rect<'gc>(
     Ok(Value::Undefined)
 }
 
-/// Length between two points on a unit circle that are 45 degrees apart from
-/// one another.
-///
-/// This constant is `H`, short for 'hypotenuse', because it is also the length
-/// of the hypotenuse formed from the control point triangle of any quadratic
-/// Bezier curve approximating a 45-degree unit circle arc.
-///
-/// The derivation of this constant - or a similar constant for any other arc
-/// angle hypotenuse - is as follows:
-///
-/// 1. Call the arc angle `alpha`. In this special case, `alpha` is 45 degrees,
-///    or one-quarter `PI`.
-/// 2. Consider the triangle formed by the center of the circle and the two
-///    points at the start and end of the arc. The two other angles will be
-///    equal, and it and `alpha` sum to 180 degrees. We'll call this angle
-///    `beta`, and it is equal to `alpha` minus 180 degrees, divided by 2.
-/// 3. Using the law of sines, we know that the sine of `alpha` divided by `H`
-///    is equal to the sine of `beta` divided by `r`, where `r` is the radius
-///    of the circle. We can solve for `H` to get the result. Note that since
-///    this is a unit circle, you won't see a radius term in this constant.
-//const H:f64 = (PI * 0.25).sin() / (PI * 0.375).sin();
+// /// Length between two points on a unit circle that are 45 degrees apart from
+// /// one another.
+// ///
+// /// This constant is `H`, short for 'hypotenuse', because it is also the length
+// /// of the hypotenuse formed from the control point triangle of any quadratic
+// /// Bezier curve approximating a 45-degree unit circle arc.
+// ///
+// /// The derivation of this constant - or a similar constant for any other arc
+// /// angle hypotenuse - is as follows:
+// ///
+// /// 1. Call the arc angle `alpha`. In this special case, `alpha` is 45 degrees,
+// ///    or one-quarter `PI`.
+// /// 2. Consider the triangle formed by the center of the circle and the two
+// ///    points at the start and end of the arc. The two other angles will be
+// ///    equal, and it and `alpha` sum to 180 degrees. We'll call this angle
+// ///    `beta`, and it is equal to `alpha` minus 180 degrees, divided by 2.
+// /// 3. Using the law of sines, we know that the sine of `alpha` divided by `H`
+// ///    is equal to the sine of `beta` divided by `r`, where `r` is the radius
+// ///    of the circle. We can solve for `H` to get the result. Note that since
+// ///    this is a unit circle, you won't see a radius term in this constant.
+// const H:f64 = (PI * 0.25).sin() / (PI * 0.375).sin();
 
-/// Length between two control points of a quadratic Bezier curve approximating
-/// a 45-degree arc of a unit circle.
-///
-/// This constant is critical to calculating the off-curve point of the control
-/// point triangle. We do so by taking the tangents at each on-curve point,
-/// which point in the direction of the off-curve points. Then, we scale one of
-/// those tangent vectors by `A_B` and add it to the on-curve point to get the
-/// off-curve point, constructing our Bezier.
-///
-/// The derivation of this constant - or a similar constant for any other arc
-/// angle Bezier - is as follows:
-///
-/// 1. Start with the value of `H` for the given arc angle `alpha`.
-/// 2. Consider the triangle formed by the three control points of our desired
-///    Bezier curve. We'll call the angle at the off-curve control point
-///    `delta`, and the two other angles of this triangle are `gamma`.
-/// 3. Because two of the lines of this triangle are tangent lines of the
-///    circle, they will form a right angle with the normal, which is the same
-///    as the line between the center of the circle and the point.
-///    Coincidentally, this right angle is shared between `beta`, meaning that
-///    we can subtract it from 90 degrees to obtain `gamma`. Or, after some
-///    elementary algebra, just take half of `alpha`.
-/// 4. We can then derive the value of `delta` by subtracting out the other two
-///    `gamma`s from 180 degrees. This, again, can be simplified to just
-///    180 degrees minus `alpha`.
-/// 5. By the law of sines, the sine of `delta` divided by `H` is equal to
-///    the sine of `gamma` divided by `A_B`. We can then rearrange this to get
-///    `H` times the sine of `gamma`, divided by the sine of `delta`; which is
-///    our `A_B` constant.
-//const A_B:f64 = H * (PI * 0.125).sin() / (PI * 0.75).sin();
+// /// Length between two control points of a quadratic Bezier curve approximating
+// /// a 45-degree arc of a unit circle.
+// ///
+// /// This constant is critical to calculating the off-curve point of the control
+// /// point triangle. We do so by taking the tangents at each on-curve point,
+// /// which point in the direction of the off-curve points. Then, we scale one of
+// /// those tangent vectors by `A_B` and add it to the on-curve point to get the
+// /// off-curve point, constructing our Bezier.
+// ///
+// /// The derivation of this constant - or a similar constant for any other arc
+// /// angle Bezier - is as follows:
+// ///
+// /// 1. Start with the value of `H` for the given arc angle `alpha`.
+// /// 2. Consider the triangle formed by the three control points of our desired
+// ///    Bezier curve. We'll call the angle at the off-curve control point
+// ///    `delta`, and the two other angles of this triangle are `gamma`.
+// /// 3. Because two of the lines of this triangle are tangent lines of the
+// ///    circle, they will form a right angle with the normal, which is the same
+// ///    as the line between the center of the circle and the point.
+// ///    Coincidentally, this right angle is shared between `beta`, meaning that
+// ///    we can subtract it from 90 degrees to obtain `gamma`. Or, after some
+// ///    elementary algebra, just take half of `alpha`.
+// /// 4. We can then derive the value of `delta` by subtracting out the other two
+// ///    `gamma`s from 180 degrees. This, again, can be simplified to just
+// ///    180 degrees minus `alpha`.
+// /// 5. By the law of sines, the sine of `delta` divided by `H` is equal to
+// ///    the sine of `gamma` divided by `A_B`. We can then rearrange this to get
+// ///    `H` times the sine of `gamma`, divided by the sine of `delta`; which is
+// ///    our `A_B` constant.
+// const A_B:f64 = H * (PI * 0.125).sin() / (PI * 0.75).sin();
 
 /// A list of five quadratic Bezier control points, intended to approximate the
 /// bottom-right quadrant of a unit circle.
@@ -482,6 +507,8 @@ const UNIT_CIRCLE_POINTS: [(f64, f64); 5] = [
     (FRAC_1_SQRT_2, FRAC_1_SQRT_2),
     (0.4142135623730951, 1.0),
     (0.00000000000000006123233995736766, 1.0),
+    // TODO: should the above be just 0.0, instead of whatever Rust printed out?
+    // Same with 0.414... not being symmetric
 ];
 
 /* [
@@ -495,50 +522,61 @@ const UNIT_CIRCLE_POINTS: [(f64, f64); 5] = [
 ]; */
 
 /// Draw a roundrect.
+#[allow(clippy::too_many_arguments)]
 fn draw_round_rect_internal(
     draw: &mut Drawing,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
-    mut ellipse_width: f64,
-    mut ellipse_height: f64,
+    top_left_width: f64,
+    top_left_height: f64,
+    top_right_width: f64,
+    top_right_height: f64,
+    bottom_left_width: f64,
+    bottom_left_height: f64,
+    bottom_right_width: f64,
+    bottom_right_height: f64,
 ) {
-    if ellipse_height.is_nan() {
-        ellipse_height = ellipse_width;
-    }
+    let top_left_width = top_left_width.min(width / 2.0);
+    let top_left_height = top_left_height.min(height / 2.0);
+    let top_right_width = top_right_width.min(width / 2.0);
+    let top_right_height = top_right_height.min(height / 2.0);
+    let bottom_left_width = bottom_left_width.min(width / 2.0);
+    let bottom_left_height = bottom_left_height.min(height / 2.0);
+    let bottom_right_width = bottom_right_width.min(width / 2.0);
+    let bottom_right_height = bottom_right_height.min(height / 2.0);
 
-    //Clamp the ellipse sizes to the size of the rectangle.
-    if ellipse_width > width {
-        ellipse_width = width;
-    }
+    let ucp = UNIT_CIRCLE_POINTS;
 
-    if ellipse_height > height {
-        ellipse_height = height;
-    }
+    let br_ellipse_center_x = x + width - bottom_right_width;
+    let br_ellipse_center_y = y + height - bottom_right_height;
+
+    let bl_ellipse_center_x = x + bottom_left_width;
+    let bl_ellipse_center_y = y + height - bottom_left_height;
+
+    let tl_ellipse_center_x = x + top_left_width;
+    let tl_ellipse_center_y = y + top_left_height;
+
+    let tr_ellipse_center_x = x + width - top_right_width;
+    let tr_ellipse_center_y = y + top_right_height;
 
     // We'll start from the bottom-right corner of the rectangle,
     // because that's what Flash Player does.
-    let ucp = UNIT_CIRCLE_POINTS;
 
-    let line_width = width - ellipse_width;
-    let line_height = height - ellipse_height;
-
-    let br_ellipse_center_x = x + ellipse_width / 2.0 + line_width;
-    let br_ellipse_center_y = y + ellipse_height / 2.0 + line_height;
-
-    let br_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[2].0;
-    let br_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[2].1;
+    // Middle of bottom-right ellipse
+    let br_point_x = br_ellipse_center_x + bottom_right_width * ucp[2].0;
+    let br_point_y = br_ellipse_center_y + bottom_right_height * ucp[2].1;
     let br_point = Point::from_pixels(br_point_x, br_point_y);
 
     draw.draw_command(DrawCommand::MoveTo(br_point));
 
-    let br_b_curve_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[3].0;
-    let br_b_curve_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[3].1;
+    let br_b_curve_x = br_ellipse_center_x + bottom_right_width * ucp[3].0;
+    let br_b_curve_y = br_ellipse_center_y + bottom_right_height * ucp[3].1;
     let br_b_curve = Point::from_pixels(br_b_curve_x, br_b_curve_y);
 
-    let right_b_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[4].0;
-    let right_b_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[4].1;
+    let right_b_point_x = br_ellipse_center_x + bottom_right_width * ucp[4].0;
+    let right_b_point_y = br_ellipse_center_y + bottom_right_height * ucp[4].1;
     let right_b_point = Point::from_pixels(right_b_point_x, right_b_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -546,24 +584,20 @@ fn draw_round_rect_internal(
         anchor: right_b_point,
     });
 
-    // Oh, since we're drawing roundrects, we also need to draw lines
-    // in between each ellipse. This is the bottom line.
-    let tl_ellipse_center_x = x + ellipse_width / 2.0;
-    let tl_ellipse_center_y = y + ellipse_height / 2.0;
-
-    let left_b_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[4].0;
-    let left_b_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[4].1;
+    // Bottom line
+    let left_b_point_x = bl_ellipse_center_x + bottom_left_width * ucp[4].0;
+    let left_b_point_y = bl_ellipse_center_y + bottom_left_height * ucp[4].1;
     let left_b_point = Point::from_pixels(left_b_point_x, left_b_point_y);
 
     draw.draw_command(DrawCommand::LineTo(left_b_point));
 
     // Bottom-left ellipse
-    let b_bl_curve_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[3].0;
-    let b_bl_curve_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[3].1;
+    let b_bl_curve_x = bl_ellipse_center_x - bottom_left_width * ucp[3].0;
+    let b_bl_curve_y = bl_ellipse_center_y + bottom_left_height * ucp[3].1;
     let b_bl_curve = Point::from_pixels(b_bl_curve_x, b_bl_curve_y);
 
-    let bl_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[2].0;
-    let bl_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[2].1;
+    let bl_point_x = bl_ellipse_center_x - bottom_left_width * ucp[2].0;
+    let bl_point_y = bl_ellipse_center_y + bottom_left_height * ucp[2].1;
     let bl_point = Point::from_pixels(bl_point_x, bl_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -571,12 +605,12 @@ fn draw_round_rect_internal(
         anchor: bl_point,
     });
 
-    let bl_l_curve_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[1].0;
-    let bl_l_curve_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[1].1;
+    let bl_l_curve_x = bl_ellipse_center_x - bottom_left_width * ucp[1].0;
+    let bl_l_curve_y = bl_ellipse_center_y + bottom_left_height * ucp[1].1;
     let bl_l_curve = Point::from_pixels(bl_l_curve_x, bl_l_curve_y);
 
-    let bottom_l_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[0].0;
-    let bottom_l_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[0].1;
+    let bottom_l_point_x = bl_ellipse_center_x - bottom_left_width * ucp[0].0;
+    let bottom_l_point_y = bl_ellipse_center_y + bottom_left_height * ucp[0].1;
     let bottom_l_point = Point::from_pixels(bottom_l_point_x, bottom_l_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -585,19 +619,19 @@ fn draw_round_rect_internal(
     });
 
     // Left side
-    let top_l_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[0].0;
-    let top_l_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[0].1;
+    let top_l_point_x = tl_ellipse_center_x - top_left_width * ucp[0].0;
+    let top_l_point_y = tl_ellipse_center_y - top_left_height * ucp[0].1;
     let top_l_point = Point::from_pixels(top_l_point_x, top_l_point_y);
 
     draw.draw_command(DrawCommand::LineTo(top_l_point));
 
     // Top-left ellipse
-    let l_tl_curve_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[1].0;
-    let l_tl_curve_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[1].1;
+    let l_tl_curve_x = tl_ellipse_center_x - top_left_width * ucp[1].0;
+    let l_tl_curve_y = tl_ellipse_center_y - top_left_height * ucp[1].1;
     let l_tl_curve = Point::from_pixels(l_tl_curve_x, l_tl_curve_y);
 
-    let tl_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[2].0;
-    let tl_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[2].1;
+    let tl_point_x = tl_ellipse_center_x - top_left_width * ucp[2].0;
+    let tl_point_y = tl_ellipse_center_y - top_left_height * ucp[2].1;
     let tl_point = Point::from_pixels(tl_point_x, tl_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -605,12 +639,12 @@ fn draw_round_rect_internal(
         anchor: tl_point,
     });
 
-    let tl_t_curve_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[3].0;
-    let tl_t_curve_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[3].1;
+    let tl_t_curve_x = tl_ellipse_center_x - top_left_width * ucp[3].0;
+    let tl_t_curve_y = tl_ellipse_center_y - top_left_height * ucp[3].1;
     let tl_t_curve = Point::from_pixels(tl_t_curve_x, tl_t_curve_y);
 
-    let left_t_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[4].0;
-    let left_t_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[4].1;
+    let left_t_point_x = tl_ellipse_center_x - top_left_width * ucp[4].0;
+    let left_t_point_y = tl_ellipse_center_y - top_left_height * ucp[4].1;
     let left_t_point = Point::from_pixels(left_t_point_x, left_t_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -619,19 +653,19 @@ fn draw_round_rect_internal(
     });
 
     // Top side
-    let right_t_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[4].0;
-    let right_t_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[4].1;
+    let right_t_point_x = tr_ellipse_center_x + top_right_width * ucp[4].0;
+    let right_t_point_y = tr_ellipse_center_y - top_right_height * ucp[4].1;
     let right_t_point = Point::from_pixels(right_t_point_x, right_t_point_y);
 
     draw.draw_command(DrawCommand::LineTo(right_t_point));
 
     // Top-right ellipse
-    let t_tr_curve_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[3].0;
-    let t_tr_curve_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[3].1;
+    let t_tr_curve_x = tr_ellipse_center_x + top_right_width * ucp[3].0;
+    let t_tr_curve_y = tr_ellipse_center_y - top_right_height * ucp[3].1;
     let t_tr_curve = Point::from_pixels(t_tr_curve_x, t_tr_curve_y);
 
-    let tr_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[2].0;
-    let tr_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[2].1;
+    let tr_point_x = tr_ellipse_center_x + top_right_width * ucp[2].0;
+    let tr_point_y = tr_ellipse_center_y - top_right_height * ucp[2].1;
     let tr_point = Point::from_pixels(tr_point_x, tr_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -639,12 +673,12 @@ fn draw_round_rect_internal(
         anchor: tr_point,
     });
 
-    let tr_r_curve_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[1].0;
-    let tr_r_curve_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[1].1;
+    let tr_r_curve_x = tr_ellipse_center_x + top_right_width * ucp[1].0;
+    let tr_r_curve_y = tr_ellipse_center_y - top_right_height * ucp[1].1;
     let tr_r_curve = Point::from_pixels(tr_r_curve_x, tr_r_curve_y);
 
-    let top_r_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[0].0;
-    let top_r_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[0].1;
+    let top_r_point_x = tr_ellipse_center_x + top_right_width * ucp[0].0;
+    let top_r_point_y = tr_ellipse_center_y - top_right_height * ucp[0].1;
     let top_r_point = Point::from_pixels(top_r_point_x, top_r_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -653,14 +687,14 @@ fn draw_round_rect_internal(
     });
 
     // Right side & other half of bottom-right ellipse
-    let bottom_r_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[0].0;
-    let bottom_r_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[0].1;
+    let bottom_r_point_x = br_ellipse_center_x + bottom_right_width * ucp[0].0;
+    let bottom_r_point_y = br_ellipse_center_y + bottom_right_height * ucp[0].1;
     let bottom_r_point = Point::from_pixels(bottom_r_point_x, bottom_r_point_y);
 
     draw.draw_command(DrawCommand::LineTo(bottom_r_point));
 
-    let r_br_curve_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[1].0;
-    let r_br_curve_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[1].1;
+    let r_br_curve_x = br_ellipse_center_x + bottom_right_width * ucp[1].0;
+    let r_br_curve_y = br_ellipse_center_y + bottom_right_height * ucp[1].1;
     let r_br_curve = Point::from_pixels(r_br_curve_x, r_br_curve_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -681,7 +715,11 @@ pub fn draw_round_rect<'gc>(
         let width = args.get_f64(activation, 2)?;
         let height = args.get_f64(activation, 3)?;
         let ellipse_width = args.get_f64(activation, 4)?;
-        let ellipse_height = args.get_f64(activation, 5)?;
+        let mut ellipse_height = args.get_f64(activation, 5)?;
+
+        if ellipse_height.is_nan() {
+            ellipse_height = ellipse_width;
+        }
 
         if let Some(mut draw) = this.as_drawing(activation.context.gc_context) {
             draw_round_rect_internal(
@@ -690,8 +728,52 @@ pub fn draw_round_rect<'gc>(
                 y,
                 width,
                 height,
-                ellipse_width,
-                ellipse_height,
+                ellipse_width / 2.0,
+                ellipse_height / 2.0,
+                ellipse_width / 2.0,
+                ellipse_height / 2.0,
+                ellipse_width / 2.0,
+                ellipse_height / 2.0,
+                ellipse_width / 2.0,
+                ellipse_height / 2.0,
+            );
+        }
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implements `Graphics.drawRoundRectComplex`
+pub fn draw_round_rect_complex<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(this) = this.as_display_object() {
+        let x = args.get_f64(activation, 0)?;
+        let y = args.get_f64(activation, 1)?;
+        let width = args.get_f64(activation, 2)?;
+        let height = args.get_f64(activation, 3)?;
+        let top_left = args.get_f64(activation, 4)?;
+        let top_right = args.get_f64(activation, 5)?;
+        let bottom_left = args.get_f64(activation, 6)?;
+        let bottom_right = args.get_f64(activation, 7)?;
+
+        if let Some(mut draw) = this.as_drawing(activation.context.gc_context) {
+            draw_round_rect_internal(
+                &mut draw,
+                x,
+                y,
+                width,
+                height,
+                top_left,
+                top_left,
+                top_right,
+                top_right,
+                bottom_left,
+                bottom_left,
+                bottom_right,
+                bottom_right,
             );
         }
     }
@@ -717,8 +799,14 @@ pub fn draw_circle<'gc>(
                 y - radius,
                 radius * 2.0,
                 radius * 2.0,
-                radius * 2.0,
-                radius * 2.0,
+                radius,
+                radius,
+                radius,
+                radius,
+                radius,
+                radius,
+                radius,
+                radius,
             );
         }
     }
@@ -739,7 +827,21 @@ pub fn draw_ellipse<'gc>(
         let height = args.get_f64(activation, 3)?;
 
         if let Some(mut draw) = this.as_drawing(activation.context.gc_context) {
-            draw_round_rect_internal(&mut draw, x, y, width, height, width, height)
+            draw_round_rect_internal(
+                &mut draw,
+                x,
+                y,
+                width,
+                height,
+                width / 2.0,
+                height / 2.0,
+                width / 2.0,
+                height / 2.0,
+                width / 2.0,
+                height / 2.0,
+                width / 2.0,
+                height / 2.0,
+            )
         }
     }
 
@@ -756,13 +858,14 @@ pub fn line_gradient_style<'gc>(
         let gradient_type = args.get_string(activation, 0);
         let gradient_type = parse_gradient_type(activation, gradient_type?)?;
         let colors = args.get_object(activation, 1, "colors")?;
-        let alphas = args.get_object(activation, 2, "alphas")?;
-        let ratios = args.get_object(activation, 3, "ratios")?;
+        let alphas = args.try_get_object(activation, 2);
+        let ratios = args.try_get_object(activation, 3);
+
         let records = build_gradient_records(
             activation,
             &colors.as_array_storage().expect("Guaranteed by AS"),
-            &alphas.as_array_storage().expect("Guaranteed by AS"),
-            &ratios.as_array_storage().expect("Guaranteed by AS"),
+            alphas,
+            ratios,
         )?;
         let matrix = if let Some(matrix) = args.try_get_object(activation, 4) {
             Matrix::from(object_to_matrix(matrix, activation)?)
@@ -888,16 +991,6 @@ pub fn draw_path<'gc>(
 
     process_commands(activation, &mut drawing, &commands, &data, winding)?;
 
-    Ok(Value::Undefined)
-}
-
-/// Implements `Graphics.drawRoundRectComplex`
-pub fn draw_round_rect_complex<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_method!(activation, "flash.display.Graphics", "drawRoundRectComplex");
     Ok(Value::Undefined)
 }
 
@@ -1138,15 +1231,13 @@ pub fn draw_graphics_data<'gc>(
         .get_object(activation, 0, "graphicsData")?
         .as_vector_storage()
     {
-        //assert_eq!(vector.value_type(), Some(activation.avm2().classes().igraphicsdata));
-
         let this = this.as_display_object().expect("Bad this");
 
         if let Some(mut drawing) = this.as_drawing(activation.context.gc_context) {
             for elem in vector.iter() {
-                let obj = elem.coerce_to_object(activation)?;
-
-                handle_igraphics_data(activation, &mut drawing, &obj)?;
+                if let Some(obj) = elem.as_object() {
+                    handle_igraphics_data(activation, &mut drawing, &obj)?;
+                }
             }
         };
     }
@@ -1208,11 +1299,7 @@ pub fn read_graphics_data<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     avm2_stub_method!(activation, "flash.display.Graphics", "readGraphicsData");
-    let value_type = activation
-        .avm2()
-        .classes()
-        .igraphicsdata
-        .inner_class_definition();
+    let value_type = activation.avm2().class_defs().igraphicsdata;
     let new_storage = VectorStorage::new(0, false, Some(value_type), activation);
     Ok(VectorObject::from_vector(new_storage, activation)?.into())
 }
@@ -1222,17 +1309,9 @@ fn read_point<'gc>(
     data: &VectorStorage<'gc>,
     data_index: &mut usize,
 ) -> Option<Point<Twips>> {
-    let x = data
-        .get(*data_index, activation)
-        .ok()?
-        .as_number(activation.context.gc_context)
-        .expect("data is not a Vec.<Number>");
+    let x = data.get(*data_index, activation).ok()?.as_f64();
 
-    let y = data
-        .get(*data_index + 1, activation)
-        .ok()?
-        .as_number(activation.context.gc_context)
-        .expect("data is not a Vec.<Number>");
+    let y = data.get(*data_index + 1, activation).ok()?.as_f64();
 
     *data_index += 2;
 
@@ -1334,8 +1413,7 @@ fn process_commands<'gc>(
         let command = commands
             .get(i, activation)
             .expect("missing command")
-            .as_integer(activation.context.gc_context)
-            .expect("commands is not a Vec.<int>");
+            .as_i32();
 
         if process_command(activation, drawing, data, command, &mut data_index).is_none() {
             break;
@@ -1355,85 +1433,39 @@ fn handle_igraphics_data<'gc>(
 ) -> Result<(), Error<'gc>> {
     let class = obj.instance_class();
 
-    if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsbitmapfill
-            .inner_class_definition()
-    {
+    if class == activation.avm2().class_defs().graphicsbitmapfill {
         let style = handle_bitmap_fill(activation, drawing, obj)?;
         drawing.set_fill_style(Some(style));
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsendfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsendfill {
         drawing.set_fill_style(None);
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsgradientfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsgradientfill {
         let style = handle_gradient_fill(activation, obj)?;
         drawing.set_fill_style(Some(style));
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicspath
-            .inner_class_definition()
-    {
-        let commands = obj
-            .get_public_property("commands", activation)?
-            .coerce_to_object(activation)?;
+    } else if class == activation.avm2().class_defs().graphicspath {
+        let commands = obj.get_public_property("commands", activation)?.as_object();
 
-        let data = obj
-            .get_public_property("data", activation)?
-            .coerce_to_object(activation)?;
+        let data = obj.get_public_property("data", activation)?.as_object();
 
         let winding = obj
             .get_public_property("winding", activation)?
             .coerce_to_string(activation)?;
 
-        process_commands(
-            activation,
-            drawing,
-            &commands
-                .as_vector_storage()
-                .expect("commands is not a Vector"),
-            &data.as_vector_storage().expect("data is not a Vector"),
-            winding,
-        )?;
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicssolidfill
-            .inner_class_definition()
-    {
+        if let (Some(commands), Some(data)) = (commands, data) {
+            process_commands(
+                activation,
+                drawing,
+                &commands.as_vector_storage().unwrap(),
+                &data.as_vector_storage().unwrap(),
+                winding,
+            )?;
+        }
+    } else if class == activation.avm2().class_defs().graphicssolidfill {
         let style = handle_solid_fill(activation, obj)?;
         drawing.set_fill_style(Some(style));
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsshaderfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsshaderfill {
         tracing::warn!("Graphics shader fill unimplemented {:?}", class);
         drawing.set_fill_style(None);
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsstroke
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsstroke {
         let thickness = obj
             .get_public_property("thickness", activation)?
             .coerce_to_number(activation)?;
@@ -1448,11 +1480,13 @@ fn handle_igraphics_data<'gc>(
                 caps_to_cap_style(caps.ok())
             };
             let fill = {
-                let fill = obj
-                    .get_public_property("fill", activation)?
-                    .coerce_to_object(activation)?;
+                let fill = obj.get_public_property("fill", activation)?.as_object();
 
-                handle_igraphics_fill(activation, drawing, &fill)?
+                if let Some(fill) = fill {
+                    handle_igraphics_fill(activation, drawing, &fill)?
+                } else {
+                    None
+                }
             };
 
             let joints = obj
@@ -1489,13 +1523,7 @@ fn handle_igraphics_data<'gc>(
 
             drawing.set_line_style(Some(line_style));
         }
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicstrianglepath
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicstrianglepath {
         handle_graphics_triangle_path(activation, drawing, obj)?;
     } else {
         panic!("Unknown graphics data class {:?}", class);
@@ -1543,48 +1571,18 @@ fn handle_igraphics_fill<'gc>(
 ) -> Result<Option<FillStyle>, Error<'gc>> {
     let class = obj.instance_class();
 
-    if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsbitmapfill
-            .inner_class_definition()
-    {
+    if class == activation.avm2().class_defs().graphicsbitmapfill {
         let style = handle_bitmap_fill(activation, drawing, obj)?;
         Ok(Some(style))
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsendfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsendfill {
         Ok(None)
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsgradientfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsgradientfill {
         let style = handle_gradient_fill(activation, obj)?;
         Ok(Some(style))
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicssolidfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicssolidfill {
         let style = handle_solid_fill(activation, obj)?;
         Ok(Some(style))
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsshaderfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsshaderfill {
         tracing::warn!("Graphics shader fill unimplemented {:?}", class);
         Ok(None)
     } else {
@@ -1614,17 +1612,13 @@ fn handle_gradient_fill<'gc>(
     activation: &mut Activation<'_, 'gc>,
     obj: &Object<'gc>,
 ) -> Result<FillStyle, Error<'gc>> {
-    let alphas = obj
-        .get_public_property("alphas", activation)?
-        .coerce_to_object(activation)?;
+    let alphas = obj.get_public_property("alphas", activation)?.as_object();
+    let ratios = obj.get_public_property("ratios", activation)?.as_object();
 
     let colors = obj
         .get_public_property("colors", activation)?
-        .coerce_to_object(activation)?;
-
-    let ratios = obj
-        .get_public_property("ratios", activation)?
-        .coerce_to_object(activation)?;
+        .as_object()
+        .ok_or_else(|| make_error_2007(activation, "colors"))?;
 
     let gradient_type = {
         let gradient_type = obj
@@ -1636,15 +1630,12 @@ fn handle_gradient_fill<'gc>(
     let records = build_gradient_records(
         activation,
         &colors.as_array_storage().expect("Guaranteed by AS"),
-        &alphas.as_array_storage().expect("Guaranteed by AS"),
-        &ratios.as_array_storage().expect("Guaranteed by AS"),
+        alphas,
+        ratios,
     )?;
 
     let matrix = {
-        let matrix = obj
-            .get_public_property("matrix", activation)
-            .ok()
-            .and_then(|mat| mat.coerce_to_object(activation).ok());
+        let matrix = obj.get_public_property("matrix", activation)?.as_object();
 
         match matrix {
             Some(matrix) => Matrix::from(object_to_matrix(matrix, activation)?),
@@ -1706,18 +1697,18 @@ fn handle_bitmap_fill<'gc>(
 ) -> Result<FillStyle, Error<'gc>> {
     let bitmap_data = obj
         .get_public_property("bitmapData", activation)?
-        .coerce_to_object(activation)?
+        .as_object()
+        .ok_or_else(|| make_error_2007(activation, "bitmap"))?
         .as_bitmap_data()
         .expect("Bitmap argument is ensured to be a BitmapData from actionscript");
 
     let matrix = obj
-        .get_public_property("matrix", activation)
-        .and_then(|prop| {
-            let matrix = prop.coerce_to_object(activation)?;
+        .get_public_property("matrix", activation)?
+        .as_object()
+        .and_then(|matrix| {
+            let matrix = Matrix::from(object_to_matrix(matrix, activation).ok()?);
 
-            let matrix = Matrix::from(object_to_matrix(matrix, activation)?);
-
-            Ok(matrix)
+            Some(matrix)
         })
         .unwrap_or(Matrix::IDENTITY);
 

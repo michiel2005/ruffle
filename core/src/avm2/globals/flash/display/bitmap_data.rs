@@ -272,7 +272,7 @@ pub fn copy_pixels<'gc>(
 
             if let Some((alpha_bitmap, alpha_point)) = alpha_source {
                 operations::copy_pixels_with_alpha_source(
-                    &mut activation.context,
+                    activation.context,
                     bitmap_data,
                     src_bitmap,
                     (src_min_x, src_min_y, src_width, src_height),
@@ -283,7 +283,7 @@ pub fn copy_pixels<'gc>(
                 );
             } else {
                 operations::copy_pixels(
-                    &mut activation.context,
+                    activation.context,
                     bitmap_data,
                     src_bitmap,
                     (src_min_x, src_min_y, src_width, src_height),
@@ -370,7 +370,7 @@ pub fn get_vector<'gc>(
             height,
         );
 
-        let value_type = activation.avm2().classes().uint.inner_class_definition();
+        let value_type = activation.avm2().class_defs().uint;
         let new_storage = VectorStorage::from_values(pixels, false, Some(value_type));
 
         return Ok(VectorObject::from_vector(new_storage, activation)?.into());
@@ -469,17 +469,14 @@ pub fn set_pixels<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let rectangle = args.get_object(activation, 0, "rect")?;
+    let bytearray = args.get_object(activation, 1, "inputByteArray")?;
 
-    let bytearray = args
-        .get(1)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_object(activation)?;
     if let Some(bitmap_data) = this.as_bitmap_data() {
         let (x, y, width, height) = get_rectangle_x_y_width_height(activation, rectangle)?;
 
         let mut ba_write = bytearray
             .as_bytearray_mut()
-            .ok_or("ArgumentError: Parameter must be a bytearray")?;
+            .expect("Parameter must be a bytearray");
 
         operations::set_pixels_from_byte_array(
             activation.context.gc_context,
@@ -559,13 +556,9 @@ pub fn copy_channel<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(bitmap_data) = this.as_bitmap_data() {
         bitmap_data.check_valid(activation)?;
-        let source_bitmap = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_object(activation)?;
 
+        let source_bitmap = args.get_object(activation, 0, "sourceBitmapData")?;
         let source_rect = args.get_object(activation, 1, "sourceRect")?;
-
         let dest_point = args.get_object(activation, 2, "destPoint")?;
 
         let dest_x = dest_point
@@ -946,7 +939,7 @@ pub fn draw<'gc>(
         // if we're actually going to draw something.
         let quality = activation.context.stage.quality();
         match operations::draw(
-            &mut activation.context,
+            activation.context,
             bitmap_data,
             source,
             transform,
@@ -1028,7 +1021,7 @@ pub fn draw_with_quality<'gc>(
         };
 
         match operations::draw(
-            &mut activation.context,
+            activation.context,
             bitmap_data,
             source,
             transform,
@@ -1179,7 +1172,7 @@ pub fn apply_filter<'gc>(
         );
 
         operations::apply_filter(
-            &mut activation.context,
+            activation.context,
             dest_bitmap,
             source_bitmap,
             source_point,

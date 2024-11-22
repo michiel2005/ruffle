@@ -10,14 +10,11 @@ package flash.display {
     import flash.geom.Point;
     import flash.events.EventDispatcher;
 
-    [Ruffle(InstanceAllocator)]
-    [Ruffle(NativeInstanceInit)]
+    [Ruffle(Abstract)]
     public class DisplayObject extends EventDispatcher implements IBitmapDrawable {
         private var _accessibilityProperties:AccessibilityProperties;
 
-        public function DisplayObject() {
-            throw new Error("Cannot instantiate abstract DisplayObject class");
-        }
+        public native function DisplayObject();
         
         public function get accessibilityProperties():AccessibilityProperties {
             return this._accessibilityProperties;
@@ -93,7 +90,9 @@ package flash.display {
         public native function get visible():Boolean;
         public native function set visible(value:Boolean):void;
 
+        [API("686")]
         public native function get metaData():Object;
+        [API("686")]
         public native function set metaData(value:Object):void;
 
         public native function get mouseX():Number;

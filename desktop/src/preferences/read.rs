@@ -63,6 +63,14 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
         result.theme_preference = value;
     }
 
+    if let Some(value) = document.parse_from_str(&mut cx, "gamemode") {
+        result.gamemode_preference = value;
+    }
+
+    if let Some(value) = document.parse_from_str(&mut cx, "open_url_mode") {
+        result.open_url_mode = value;
+    }
+
     document.get_table_like(&mut cx, "log", |cx, log| {
         if let Some(value) = log.parse_from_str(cx, "filename_pattern") {
             result.log.filename_pattern = value;
@@ -84,6 +92,7 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{GameModePreference, OpenUrlMode};
     use crate::gui::ThemePreference;
     use crate::log::FilenamePattern;
     use crate::preferences::{storage::StorageBackend, LogPreferences, StoragePreferences};
@@ -582,6 +591,118 @@ mod tests {
                 expected: "string",
                 actual: "integer",
                 path: "theme".to_string(),
+            }],
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn gamemode() {
+        let result = read_preferences("gamemode = \"on\"");
+        assert_eq!(
+            &SavedGlobalPreferences {
+                gamemode_preference: GameModePreference::On,
+                ..Default::default()
+            },
+            result.values()
+        );
+        assert_eq!(Vec::<ParseWarning>::new(), result.warnings);
+
+        let result = read_preferences("gamemode = \"off\"");
+        assert_eq!(
+            &SavedGlobalPreferences {
+                gamemode_preference: GameModePreference::Off,
+                ..Default::default()
+            },
+            result.values()
+        );
+        assert_eq!(Vec::<ParseWarning>::new(), result.warnings);
+
+        let result = read_preferences("gamemode = \"default\"");
+        assert_eq!(
+            &SavedGlobalPreferences {
+                gamemode_preference: GameModePreference::Default,
+                ..Default::default()
+            },
+            result.values()
+        );
+        assert_eq!(
+            vec![ParseWarning::UnsupportedValue {
+                value: "default".to_string(),
+                path: "gamemode".to_string(),
+            }],
+            result.warnings
+        );
+
+        let result = read_preferences("gamemode = 1");
+        assert_eq!(
+            &SavedGlobalPreferences {
+                gamemode_preference: GameModePreference::Default,
+                ..Default::default()
+            },
+            result.values()
+        );
+        assert_eq!(
+            vec![ParseWarning::UnexpectedType {
+                expected: "string",
+                actual: "integer",
+                path: "gamemode".to_string(),
+            }],
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn open_url_mode() {
+        let result = read_preferences("open_url_mode = \"allow\"");
+        assert_eq!(
+            &SavedGlobalPreferences {
+                open_url_mode: OpenUrlMode::Allow,
+                ..Default::default()
+            },
+            result.values()
+        );
+        assert_eq!(Vec::<ParseWarning>::new(), result.warnings);
+
+        let result = read_preferences("open_url_mode = \"deny\"");
+        assert_eq!(
+            &SavedGlobalPreferences {
+                open_url_mode: OpenUrlMode::Deny,
+                ..Default::default()
+            },
+            result.values()
+        );
+        assert_eq!(Vec::<ParseWarning>::new(), result.warnings);
+
+        let result = read_preferences("open_url_mode = \"confirm\"");
+        assert_eq!(
+            &SavedGlobalPreferences {
+                open_url_mode: OpenUrlMode::Confirm,
+                ..Default::default()
+            },
+            result.values()
+        );
+        assert_eq!(
+            vec![ParseWarning::UnsupportedValue {
+                value: "confirm".to_string(),
+                path: "open_url_mode".to_string(),
+            }],
+            result.warnings
+        );
+
+        let result = read_preferences("open_url_mode = 1");
+        assert_eq!(
+            &SavedGlobalPreferences {
+                open_url_mode: OpenUrlMode::Confirm,
+                ..Default::default()
+            },
+            result.values()
+        );
+        assert_eq!(
+            vec![ParseWarning::UnexpectedType {
+                expected: "string",
+                actual: "integer",
+                path: "open_url_mode".to_string(),
             }],
             result.warnings
         );

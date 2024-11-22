@@ -3,12 +3,13 @@ import {
     AutoPlay,
     ContextMenu,
     DataLoadOptions,
+    DEFAULT_CONFIG,
     NetworkingAccessMode,
     UnmuteOverlay,
     URLLoadOptions,
     WindowMode,
-} from "../../load-options";
-import type { MovieMetadata } from "../../movie-metadata";
+} from "../../public/config";
+import { MovieMetadata, ReadyState } from "../../public/player";
 import { ruffleShadowTemplate } from "../ui/shadow-template";
 import { text, textAsParagraphs } from "../i18n";
 import { swfFileName } from "../../swf-utils";
@@ -25,7 +26,6 @@ import { showPanicScreen } from "../ui/panic";
 import { createRuffleBuilder } from "../../load-ruffle";
 import { lookupElement } from "../register-element";
 import { configureBuilder } from "../builder";
-import { DEFAULT_CONFIG } from "../../config";
 
 const DIMENSION_REGEX = /^\s*(\d+(\.\d+)?(%)?)/;
 
@@ -42,7 +42,13 @@ declare global {
         webkitCancelFullScreen?: () => void;
     }
     interface Element {
+        /**
+         * @ignore
+         */
         webkitRequestFullscreen?: (options: unknown) => unknown;
+        /**
+         * @ignore
+         */
         webkitRequestFullScreen?: (options: unknown) => unknown;
     }
 }
@@ -185,6 +191,8 @@ export class InnerPlayer {
     private volumeSettings: VolumeControls;
     private readonly debugPlayerInfo: () => string;
     protected readonly onCallbackAvailable: (name: string) => void;
+    private readonly onFSCommand: ((command: string, args: string) => void)[] =
+        [];
 
     public constructor(
         element: HTMLElement,
@@ -195,7 +203,10 @@ export class InnerPlayer {
         this.debugPlayerInfo = debugPlayerInfo;
         this.onCallbackAvailable = onCallbackAvailable;
 
-        this.shadow = this.element.attachShadow({ mode: "open" });
+        this.shadow = this.element.attachShadow({
+            mode: "open",
+            delegatesFocus: true,
+        });
         this.shadow.appendChild(ruffleShadowTemplate.content.cloneNode(true));
 
         this.dynamicStyles = this.shadow.getElementById(
@@ -260,6 +271,13 @@ export class InnerPlayer {
             "context-menu-overlay",
         )!;
         this.contextMenuElement = this.shadow.getElementById("context-menu")!;
+        const preserveMenu = (event: MouseEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        this.contextMenuElement.addEventListener("contextmenu", preserveMenu);
+        this.contextMenuElement.addEventListener("click", preserveMenu);
+
         document.documentElement.addEventListener(
             "pointerdown",
             this.checkIfTouch.bind(this),
@@ -296,7 +314,6 @@ export class InnerPlayer {
 
         this.instance = null;
         this.newZipWriter = null;
-        this.onFSCommand = null;
 
         this._readyState = ReadyState.HaveNothing;
         this.metadata = null;
@@ -305,15 +322,19 @@ export class InnerPlayer {
         this.setupPauseOnTabHidden();
     }
 
-    /**
-     * A movie can communicate with the hosting page using fscommand
-     * as long as script access is allowed.
-     *
-     * @param command A string passed to the host application for any use.
-     * @param args A string passed to the host application for any use.
-     * @returns True if the command was handled.
-     */
-    onFSCommand: ((command: string, args: string) => boolean) | null;
+    addFSCommandHandler(handler: (command: string, args: string) => void) {
+        this.onFSCommand.push(handler);
+    }
+
+    public callFSCommand(command: string, args: string): boolean {
+        if (this.onFSCommand.length == 0) {
+            return false;
+        }
+        for (const handler of this.onFSCommand) {
+            handler(command, args);
+        }
+        return true;
+    }
 
     /**
      * Any configuration that should apply to this specific player.
@@ -984,61 +1005,24 @@ export class InnerPlayer {
         this.instance?.set_fullscreen(this.isFullscreen);
     }
 
-    /**
-     * Prompt the user to download a file.
-     *
-     * @param blob The content to download.
-     * @param name The name to give the file.
-     */
-    private saveFile(blob: Blob, name: string): void {
-        const blobURL = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = blobURL;
-        link.download = name;
-        link.click();
-        URL.revokeObjectURL(blobURL);
-    }
-
     private checkIfTouch(event: PointerEvent): void {
         this.isTouch =
             event.pointerType === "touch" || event.pointerType === "pen";
     }
 
-    private base64ToArray(bytesBase64: string): Uint8Array {
-        const byteString = atob(bytesBase64);
-        const ia = new Uint8Array(byteString.length);
-        for (let i = 0; i < byteString.length; i++) {
-            ia[i] = byteString.charCodeAt(i);
-        }
-        return ia;
-    }
-
-    private base64ToBlob(bytesBase64: string, mimeString: string): Blob {
-        const ab = this.base64ToArray(bytesBase64);
-        const blob = new Blob([ab], { type: mimeString });
-        return blob;
-    }
-
     /**
-     * @returns If the string represent a base-64 encoded SOL file
-     * Check if string is a base-64 encoded SOL file
-     * @param solData The base-64 encoded SOL string
+     * Confirm reload or delete of save file.
+     *
+     * @param solKey The key of the SOL file.
+     * @param b64SolData The base-64 encoded SOL string.
+     * @param replace Whether to replace or delete the save file.
      */
-    private isB64SOL(solData: string): boolean {
-        try {
-            const decodedData = atob(solData);
-            return decodedData.slice(6, 10) === "TCSO";
-        } catch (e) {
-            return false;
-        }
-    }
-
     private confirmReloadSave(
         solKey: string,
         b64SolData: string,
         replace: boolean,
-    ) {
-        if (this.isB64SOL(b64SolData)) {
+    ): void {
+        if (isB64SOL(b64SolData)) {
             if (localStorage[solKey]) {
                 if (!replace) {
                     const confirmDelete = confirm(text("save-delete-prompt"));
@@ -1077,11 +1061,12 @@ export class InnerPlayer {
         }
     }
 
+
     /**
      * Replace save from SOL file.
      *
-     * @param event The change event fired
-     * @param solKey The localStorage save file key
+     * @param event The change event fired.
+     * @param solKey The localStorage save file key.
      */
     private replaceSOL(event: Event, solKey: string): void {
         const fileInput = event.target as HTMLInputElement;
@@ -1122,20 +1107,38 @@ export class InnerPlayer {
         return Object.keys(localStorage).some((key) => {
             const solName = key.split("/").pop();
             const solData = localStorage.getItem(key);
-            return solName && solData && this.isB64SOL(solData);
+            return solName && solData && isB64SOL(solData);
         });
     }
 
     /**
      * Delete local save.
      *
-     * @param key The key to remove from local storage
+     * @param key The key to remove from local storage.
      */
     private deleteSave(key: string): void {
         const b64SolData = localStorage.getItem(key);
         if (b64SolData) {
             this.confirmReloadSave(key, b64SolData, false);
         }
+    }
+
+    private SaveRow = ({rowKey, solName, solData}: {rowKey: string, solName: string, solData: string}) => {
+        return (
+            <tr>
+                <td title={ rowKey }>{ solName }</td>
+                <td>
+                    <span class="save-option" id="download-save" title={ text("save-download") } onClick={() => saveFile(base64ToBlob(solData, "application/octet-stream"), solName + ".sol")}></span>
+                </td>
+                <td>
+                    <input type="file" accept=".sol" class="replace-save" id={ "replace-save-" + rowKey } onChange={(ev) => this.replaceSOL(ev, rowKey)} />
+                    <label for={ "replace-save-" + rowKey } class="save-option" id="replace-save" title={ text("save-replace") }></label>
+                </td>
+                <td>
+                    <span class="save-option" id="delete-save" title={ text("save-delete") } onClick={() => this.deleteSave(rowKey)}></span>
+                </td>
+            </tr>
+        );
     }
 
     /**
@@ -1150,58 +1153,8 @@ export class InnerPlayer {
         Object.keys(localStorage).forEach((key) => {
             const solName = key.split("/").pop();
             const solData = localStorage.getItem(key);
-            if (solName && solData && this.isB64SOL(solData)) {
-                const row = document.createElement("TR");
-                const keyCol = document.createElement("TD");
-                keyCol.textContent = solName;
-                keyCol.title = key;
-                const downloadCol = document.createElement("TD");
-                const downloadSpan = document.createElement("SPAN");
-                downloadSpan.className = "save-option";
-                downloadSpan.id = "download-save";
-                downloadSpan.title = text("save-download");
-                downloadSpan.addEventListener("click", () => {
-                    const blob = this.base64ToBlob(
-                        solData,
-                        "application/octet-stream",
-                    );
-                    this.saveFile(blob, solName + ".sol");
-                });
-                downloadCol.appendChild(downloadSpan);
-                const replaceCol = document.createElement("TD");
-                const replaceInput = document.createElement(
-                    "INPUT",
-                ) as HTMLInputElement;
-                replaceInput.type = "file";
-                replaceInput.accept = ".sol";
-                replaceInput.className = "replace-save";
-                replaceInput.id = "replace-save-" + key;
-                const replaceLabel = document.createElement(
-                    "LABEL",
-                ) as HTMLLabelElement;
-                replaceLabel.htmlFor = "replace-save-" + key;
-                replaceLabel.className = "save-option";
-                replaceLabel.id = "replace-save";
-                replaceLabel.title = text("save-replace");
-                replaceInput.addEventListener("change", (event) =>
-                    this.replaceSOL(event, key),
-                );
-                replaceCol.appendChild(replaceInput);
-                replaceCol.appendChild(replaceLabel);
-                const deleteCol = document.createElement("TD");
-                const deleteSpan = document.createElement("SPAN");
-                deleteSpan.className = "save-option";
-                deleteSpan.id = "delete-save";
-                deleteSpan.title = text("save-delete");
-                deleteSpan.addEventListener("click", () =>
-                    this.deleteSave(key),
-                );
-                deleteCol.appendChild(deleteSpan);
-                row.appendChild(keyCol);
-                row.appendChild(downloadCol);
-                row.appendChild(replaceCol);
-                row.appendChild(deleteCol);
-                saveTable.appendChild(row);
+            if (solName && solData && isB64SOL(solData)) {
+                saveTable.appendChild(<this.SaveRow rowKey={key} solName={solName} solData={solData} />);
             }
         });
     }
@@ -1215,8 +1168,8 @@ export class InnerPlayer {
         Object.keys(localStorage).forEach((key) => {
             let solName = String(key.split("/").pop());
             const solData = localStorage.getItem(key);
-            if (solData && this.isB64SOL(solData)) {
-                const array = this.base64ToArray(solData);
+            if (solData && isB64SOL(solData)) {
+                const array = base64ToArray(solData);
                 const duplicate = duplicateNames.filter(
                     (value) => value === solName,
                 ).length;
@@ -1228,7 +1181,7 @@ export class InnerPlayer {
             }
         });
         const blob = new Blob([zip.save()], { type: "application/zip" });
-        this.saveFile(blob, "saves.zip");
+        saveFile(blob, "saves.zip");
     }
 
     /**
@@ -1266,7 +1219,7 @@ export class InnerPlayer {
                     return;
                 }
                 const blob = await response.blob();
-                this.saveFile(blob, swfFileName(this.swfUrl));
+                saveFile(blob, swfFileName(this.swfUrl));
             } else {
                 console.error("SWF download failed");
             }
@@ -1565,6 +1518,7 @@ export class InnerPlayer {
                             "menu-item": true,
                             disabled: enabled === false,
                         }}
+                        data-text={text}
                     >
                         {text}
                     </li>
@@ -1572,20 +1526,26 @@ export class InnerPlayer {
                 this.contextMenuElement.appendChild(menuItem);
 
                 if (enabled !== false) {
-                    menuItem.addEventListener(
-                        this.contextMenuSupported ? "click" : "pointerup",
-                        async (event: MouseEvent) => {
-                            // Prevent the menu from being destroyed.
-                            // It's required when we're dealing with async callbacks,
-                            // as the async callback may still use the menu in the future.
-                            event.stopPropagation();
+                    const itemAction = async (event: MouseEvent) => {
+                        // Prevent right-clicks from displaying the browser context menu.
+                        event.preventDefault();
 
-                            await onClick(event);
+                        // Prevent the menu from being destroyed.
+                        // It's required when we're dealing with async callbacks,
+                        // as the async callback may still use the menu in the future.
+                        event.stopPropagation();
 
-                            // Then we have to close the context menu manually after the callback finishes.
-                            this.hideContextMenu();
-                        },
-                    );
+                        await onClick(event);
+
+                        // Then we have to close the context menu manually after the callback finishes.
+                        this.hideContextMenu();
+                    };
+                    if (this.contextMenuSupported) {
+                        menuItem.addEventListener("click", itemAction);
+                        menuItem.addEventListener("contextmenu", itemAction);
+                    } else {
+                        menuItem.addEventListener("pointerup", itemAction);
+                    }
                 }
             }
         }
@@ -1822,6 +1782,7 @@ export class InnerPlayer {
         }
         this.panicked = true;
         this.hideSplashScreen();
+        const originalError = error;
 
         if (
             error instanceof Error &&
@@ -1841,6 +1802,7 @@ export class InnerPlayer {
                 this.addOpenInNewTabMessage(openInNewTab, swfUrl);
                 return;
             }
+            error = error.cause;
         }
 
         const errorArray: Array<string | null> & {
@@ -1879,7 +1841,7 @@ export class InnerPlayer {
         errorArray.push(this.getPanicData());
 
         // Clears out any existing content (ie play button or canvas) and replaces it with the error screen
-        showPanicScreen(this.container, error, errorArray, this.swfUrl);
+        showPanicScreen(this.container, originalError, errorArray, this.swfUrl);
 
         // Do this last, just in case it causes any cascading issues.
         this.destroy();
@@ -1938,7 +1900,7 @@ export class InnerPlayer {
      *
      * @param message The message shown to the user.
      */
-    protected displayMessage(message: string): void {
+    public displayMessage(message: string): void {
         const div = document.createElement("div");
         div.id = "message-overlay";
         const messageDiv = document.createElement("div");
@@ -2015,26 +1977,6 @@ export class InnerPlayer {
         // TODO: Move this to whatever function changes the ReadyState to Loaded when we have streaming support.
         this.element.dispatchEvent(new CustomEvent(InnerPlayer.LOADED_DATA));
     }
-}
-
-/**
- * Describes the loading state of an SWF movie.
- */
-export enum ReadyState {
-    /**
-     * No movie is loaded, or no information is yet available about the movie.
-     */
-    HaveNothing = 0,
-
-    /**
-     * The movie is still loading, but it has started playback, and metadata is available.
-     */
-    Loading = 1,
-
-    /**
-     * The movie has completely loaded.
-     */
-    Loaded = 2,
 }
 
 /**
@@ -2221,6 +2163,77 @@ export function isFallbackElement(elem: Element): boolean {
         parent = parent.parentElement;
     }
     return false;
+}
+
+/**
+ * Prompt the user to download a file.
+ *
+ * @param blob The content to download.
+ * @param name The name to give the file.
+ */
+function saveFile(blob: Blob, name: string): void {
+    const blobURL = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = blobURL;
+    link.download = name;
+    link.click();
+    URL.revokeObjectURL(blobURL);
+}
+
+/**
+ * Create a new Uint8Array object from a base64-encoded string.
+ *
+ * @param bytesBase64 The base64-encoded string.
+ * @returns The new Uint8Array.
+ */
+function base64ToArray(bytesBase64: string): Uint8Array {
+    const byteString = atob(bytesBase64);
+    return Uint8Array.from(byteString, char => char.charCodeAt(0));
+}
+
+/**
+ * Create a new Blob of the given type from a base64-encoded string.
+ *
+ * @param bytesBase64 The base64-encoded string..
+ * @returns The new Blob.
+ */
+function base64ToBlob(bytesBase64: string, mimeString: string): Blob {
+    const ab = base64ToArray(bytesBase64);
+    const blob = new Blob([ab], { type: mimeString });
+    return blob;
+}
+
+/**
+ * Check if string is a base-64 encoded SOL file.
+ *
+ * @param solData The base-64 encoded SOL string.
+ * @returns If the string represent a base-64 encoded SOL file.
+ */
+function isB64SOL(solData: string): boolean {
+    try {
+        const decodedData = atob(solData);
+        return isSolData(decodedData);
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
+ * Check if string is structured like SOL data up until the end of the header.
+ * See https://www.sans.org/blog/local-shared-objects-aka-flash-cookies/.
+ *
+ * @param data The SOL string.
+ * @returns If the string seemingly represents an SOL file.
+ */
+function isSolData(data: string): boolean {
+    return (
+       // First two bytes are a magic value (0x00 0xbf)
+       data.charCodeAt(0) === 0x00 && data.charCodeAt(1) === 0xbf &&
+       // Seventh through tenth bytes are another magic value (ASCII value of TCSO)
+       data.slice(6, 10) === "TCSO" &&
+       // Next six bytes are padding (0x00 0x04 0x00 0x00 0x00 0x00)
+       [0x00, 0x04, 0x00, 0x00, 0x00, 0x00].every((v, i) => data.charCodeAt(10 + i) === v)
+    );
 }
 
 /**

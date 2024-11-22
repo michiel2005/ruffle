@@ -14,8 +14,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use swf::avm2::read::Reader;
 use swf::avm2::types::*;
 use swf::avm2::write::Writer;
+use swf::extensions::ReadSwfExt;
 use swf::{DoAbc2, DoAbc2Flag, Header, Tag};
 use walkdir::WalkDir;
 
@@ -25,12 +27,17 @@ const RUFFLE_METADATA_NAME: &str = "Ruffle";
 // Indicates that we should generate a reference to an instance allocator
 // method (used as a metadata key with `Ruffle` metadata)
 const METADATA_INSTANCE_ALLOCATOR: &str = "InstanceAllocator";
-// Indicates that we should generate a reference to a native initializer
-// method (used as a metadata key with `Ruffle` metadata)
-const METADATA_NATIVE_INSTANCE_INIT: &str = "NativeInstanceInit";
 /// Indicates that we should generate a reference to a class call handler
 /// method (used as a metadata key with `Ruffle` metadata)
 const METADATA_CALL_HANDLER: &str = "CallHandler";
+/// Indicates that we should generate a reference to a custom constructor
+/// method (used as a metadata key with `Ruffle` metadata)
+const METADATA_CUSTOM_CONSTRUCTOR: &str = "CustomConstructor";
+/// Indicates that the class can't be directly instantiated (but its child classes might be).
+/// Binds to an always-throwing allocator.
+/// (This can also be used on final non-abstract classes that you just want to disable `new` for.
+///  We just didn't find a better name for this concept than "abstract")
+const METADATA_ABSTRACT: &str = "Abstract";
 // The name for metadata for namespace versioning- the Flex SDK doesn't
 // strip versioning metadata, so we have to allow this metadata name
 const API_METADATA_NAME: &str = "API";
@@ -298,6 +305,43 @@ fn strip_metadata(abc: &mut AbcFile) {
     }
 }
 
+/// If we don't properly declare 'namespace AS3' in the input to asc.jar, then
+/// a call like `self.AS3::toXMLString()` will end up getting compiled to weird bytecode like this:
+///
+/// ```pcode
+/// getlex Multiname("AS3",[PackageNamespace(""),PrivateNamespace(null,"35"),PackageInternalNs(""),PrivateNamespace(null,"33"),ProtectedNamespace("XML"),StaticProtectedNs("XML")])
+/// coerce QName(PackageNamespace(""),"Namespace")
+/// getproperty RTQName("toXMLString")
+/// getlocal2
+/// call 0
+/// ```
+///
+/// This will cause a new bound method to be created, instead of going through 'callproperty'.
+///
+/// We detect this case by looking for the weird 'getlex AS3', which should never happen normally.
+fn check_weird_namespace_lookup(abc: &AbcFile) -> Result<(), Box<dyn std::error::Error>> {
+    for body in &abc.method_bodies {
+        let mut reader = Reader::new(&body.code);
+        while reader.pos(&body.code) != body.code.len() {
+            let op: Op = reader.read_op()?;
+            if let Op::GetLex { index } = op {
+                let multiname = &abc.constant_pool.multinames[index.0 as usize - 1];
+                if let Multiname::QName { name, .. } | Multiname::Multiname { name, .. } = multiname
+                {
+                    let name =
+                        String::from_utf8_lossy(&abc.constant_pool.strings[name.0 as usize - 1]);
+                    if name == "AS3" {
+                        panic!(
+                            r#"Found getlex of "AS3" in method body. Make sure you have `namespace AS3 = "http://adobe.com/AS3/2006/builtin";` in your `package` block"#
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Handles native functions defined in our `playerglobal`
 ///
 /// The high-level idea is to generate code (specifically, a `TokenStream`)
@@ -319,11 +363,13 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
     let mut reader = swf::avm2::read::Reader::new(data);
     let mut abc = reader.read()?;
 
+    check_weird_namespace_lookup(&abc)?;
+
     let none_tokens = quote! { None };
     let mut rust_paths = vec![none_tokens.clone(); abc.methods.len()];
     let mut rust_instance_allocators = vec![none_tokens.clone(); abc.classes.len()];
-    let mut rust_native_instance_initializers = vec![none_tokens.clone(); abc.classes.len()];
-    let mut rust_call_handlers = vec![none_tokens; abc.classes.len()];
+    let mut rust_call_handlers = vec![none_tokens.clone(); abc.classes.len()];
+    let mut rust_custom_constructors = vec![none_tokens; abc.classes.len()];
 
     let mut check_trait = |trait_: &Trait, parent: Option<Index<Multiname>>| {
         let method_id = match trait_.kind {
@@ -358,26 +404,69 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
             rust_method_name_and_path(&abc, trait_, parent, method_prefix, "");
     };
 
-    // Look for `[Ruffle(InstanceAllocator)]` metadata - if present,
-    // generate a reference to an allocator function in the native instance
+    // We support four kinds of native methods:
+    // instance methods, class methods, script methods ("freestanding") and initializers.
+    // We're going to insert them into an array indexed by `MethodId`,
+    // so it doesn't matter what order we visit them in.
+    for (i, instance) in abc.instances.iter().enumerate() {
+        // Look for native instance methods
+        for trait_ in &instance.traits {
+            check_trait(trait_, Some(instance.name));
+        }
+        // Look for native class methods (in the corresponding
+        // `Class` definition)
+        for trait_ in &abc.classes[i].traits {
+            check_trait(trait_, Some(instance.name));
+        }
+    }
+    // Look for freestanding methods
+    for script in &abc.scripts {
+        for trait_ in &script.traits {
+            check_trait(trait_, None);
+        }
+    }
+
+    // Look for `[Ruffle(InstanceAllocator)]` and similar metadata - if present,
+    // generate a reference to a function in the native instance
     // allocators table.
-    let mut check_instance_allocator = |trait_: &Trait| {
+    let mut check_class = |trait_: &Trait| {
         let class_id = if let TraitKind::Class { class, .. } = trait_.kind {
             class.0
         } else {
             return;
         };
 
-        let class_name_idx = abc.instances[class_id as usize].name.0;
+        let class_name_idx = abc.instances[class_id as usize].name;
         let class_name = resolve_multiname_name(
             &abc,
-            &abc.constant_pool.multinames[class_name_idx as usize - 1],
+            &abc.constant_pool.multinames[class_name_idx.0 as usize - 1],
         );
 
         let instance_allocator_method_name =
             "::".to_string() + &flash_to_rust_path(&class_name) + "_allocator";
-        let native_instance_init_method_name = "::native_instance_init".to_string();
+        let init_method_name = "::".to_string() + &flash_to_rust_path(&class_name) + "_initializer";
         let call_handler_method_name = "::call_handler".to_string();
+        let custom_constructor_method_name =
+            "::".to_string() + &flash_to_rust_path(&class_name) + "_constructor";
+
+        // Also support instance initializer - let's pretend it's a trait.
+        let init_method_idx = abc.instances[class_id as usize].init_method;
+        let init_method = &abc.methods[init_method_idx.0 as usize];
+        if init_method.flags.contains(MethodFlags::NATIVE) {
+            let init_trait = Trait {
+                name: class_name_idx,
+                kind: TraitKind::Method {
+                    disp_id: 0, // unused
+                    method: abc.classes[class_id as usize].init_method,
+                },
+                metadata: vec![],   // unused
+                is_final: true,     // unused
+                is_override: false, // unused
+            };
+            rust_paths[init_method_idx.0 as usize] =
+                rust_method_name_and_path(&abc, &init_trait, None, "", &init_method_name);
+        }
+
         for metadata_idx in &trait_.metadata {
             let metadata = &abc.metadata[metadata_idx.0 as usize];
             let name =
@@ -410,16 +499,6 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
                             &instance_allocator_method_name,
                         );
                     }
-                    (None, METADATA_NATIVE_INSTANCE_INIT) if !is_versioning => {
-                        rust_native_instance_initializers[class_id as usize] =
-                            rust_method_name_and_path(
-                                &abc,
-                                trait_,
-                                None,
-                                "",
-                                &native_instance_init_method_name,
-                            )
-                    }
                     (None, METADATA_CALL_HANDLER) if !is_versioning => {
                         rust_call_handlers[class_id as usize] = rust_method_name_and_path(
                             &abc,
@@ -427,7 +506,24 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
                             None,
                             "",
                             &call_handler_method_name,
-                        )
+                        );
+                    }
+                    (None, METADATA_CUSTOM_CONSTRUCTOR) if !is_versioning => {
+                        rust_custom_constructors[class_id as usize] = rust_method_name_and_path(
+                            &abc,
+                            trait_,
+                            None,
+                            "",
+                            &custom_constructor_method_name,
+                        );
+                    }
+                    (None, METADATA_ABSTRACT) if !is_versioning => {
+                        rust_instance_allocators[class_id as usize] = {
+                            let path = "crate::avm2::object::abstract_class_allocator";
+                            let path_tokens = TokenStream::from_str(path).unwrap();
+                            let flash_method_path = "unused".to_string();
+                            quote! { Some((#flash_method_path, #path_tokens)) }
+                        };
                     }
                     (None, _) if is_versioning => {}
                     _ => panic!("Unexpected metadata pair ({key:?}, {value})"),
@@ -436,27 +532,10 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
         }
     };
 
-    // We support three kinds of native methods:
-    // instance methods, class methods, and freestanding functions.
-    // We're going to insert them into an array indexed by `MethodId`,
-    // so it doesn't matter what order we visit them in.
-    for (i, instance) in abc.instances.iter().enumerate() {
-        // Look for native instance methods
-        for trait_ in &instance.traits {
-            check_trait(trait_, Some(instance.name));
-        }
-        // Look for native class methods (in the corresponding
-        // `Class` definition)
-        for trait_ in &abc.classes[i].traits {
-            check_trait(trait_, Some(instance.name));
-        }
-    }
-
-    // Look for freestanding methods
+    // Handle classes
     for script in &abc.scripts {
         for trait_ in &script.traits {
-            check_trait(trait_, None);
-            check_instance_allocator(trait_);
+            check_class(trait_);
         }
     }
     // Finally, generate the actual code.
@@ -488,20 +567,18 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
             #(#rust_instance_allocators,)*
         ];
 
-        // This is very similar to `NATIVE_METHOD_TABLE`, but we have one entry per
-        // class, rather than per method. When an entry is `Some(fn_ptr)`, we use
-        // `fn_ptr` as the native initializer for the corresponding class when we
-        // load it into Ruffle.
-        pub const NATIVE_INSTANCE_INIT_TABLE: &[Option<(&'static str, crate::avm2::method::NativeMethodImpl)>] = &[
-            #(#rust_native_instance_initializers,)*
-        ];
-
-        // This is very similar to `NATIVE_INSTANCE_INIT_TABLE`.
-        // When an entry is `Some(fn_ptr)`, we use
-        // `fn_ptr` as the native call handler for the corresponding class when we
-        // load it into Ruffle.
+        // This is very similar to `NATIVE_INSTANCE_ALLOCATOR_TABLE`.
+        // When an entry is `Some(fn_ptr)`, we use `fn_ptr` as the native call
+        // handler for the corresponding class when we load it into Ruffle.
         pub const NATIVE_CALL_HANDLER_TABLE: &[Option<(&'static str, crate::avm2::method::NativeMethodImpl)>] = &[
             #(#rust_call_handlers,)*
+        ];
+
+        // This is very similar to `NATIVE_INSTANCE_ALLOCATOR_TABLE`.
+        // When an entry is `Some(fn_ptr)`, we use `fn_ptr` as the native custom
+        // constructor for the corresponding class when we load it into Ruffle.
+        pub const NATIVE_CUSTOM_CONSTRUCTOR_TABLE: &[Option<(&'static str, crate::avm2::class::CustomConstructorFn)>] = &[
+            #(#rust_custom_constructors,)*
         ];
     }
     .to_string();

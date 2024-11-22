@@ -1,7 +1,7 @@
 //! Class object impl
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::{AllocatorFn, Class};
+use crate::avm2::class::{AllocatorFn, Class, CustomConstructorFn};
 use crate::avm2::error::{argument_error, make_error_1127, reference_error, type_error};
 use crate::avm2::function::exec;
 use crate::avm2::method::Method;
@@ -210,8 +210,7 @@ impl<'gc> ClassObject<'gc> {
 
         self.instance_vtable().init_vtable(
             class,
-            Some(self),
-            &class.traits(),
+            self.superclass_object(),
             Some(self.instance_scope()),
             self.superclass_object().map(|cls| cls.instance_vtable()),
             activation.context.gc_context,
@@ -247,19 +246,19 @@ impl<'gc> ClassObject<'gc> {
             .c_class()
             .expect("ClassObject should have an i_class");
 
+        let class_classobject = activation.avm2().classes().class;
+
         // class vtable == class traits + Class instance traits
         let class_vtable = VTable::empty(activation.context.gc_context);
         class_vtable.init_vtable(
             c_class,
-            Some(self),
-            &c_class.traits(),
+            Some(class_classobject),
             Some(self.class_scope()),
-            Some(activation.avm2().classes().class.instance_vtable()),
+            Some(class_classobject.instance_vtable()),
             activation.context.gc_context,
         );
 
         self.set_vtable(activation.context.gc_context, class_vtable);
-        self.base().install_instance_slots(activation.gc());
 
         self.run_class_initializer(activation)?;
 
@@ -293,13 +292,11 @@ impl<'gc> ClassObject<'gc> {
         // interfaces (i.e. those that were not already implemented by the superclass)
         // Otherwise, our behavior diverges from Flash Player in certain cases.
         // See the ignored test 'tests/tests/swfs/avm2/weird_superinterface_properties/'
+        let internal_ns = activation.avm2().namespaces.public_vm_internal();
         for interface in &*class.all_interfaces() {
             for interface_trait in &*interface.traits() {
                 if !interface_trait.name().namespace().is_public() {
-                    let public_name = QName::new(
-                        activation.context.avm2.public_namespace_vm_internal,
-                        interface_trait.name().local_name(),
-                    );
+                    let public_name = QName::new(internal_ns, interface_trait.name().local_name());
                     self.instance_vtable().copy_property_for_interface(
                         activation.context.gc_context,
                         public_name,
@@ -327,6 +324,7 @@ impl<'gc> ClassObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
         let object: Object<'gc> = self.into();
+        let class_classobject = activation.avm2().classes().class;
 
         let scope = self.0.class_scope;
         let c_class = self
@@ -340,7 +338,8 @@ impl<'gc> ClassObject<'gc> {
             class_initializer,
             scope,
             Some(object),
-            Some(self),
+            Some(class_classobject),
+            Some(c_class),
         );
 
         class_init_fn.call(object.into(), &[], activation)?;
@@ -356,36 +355,13 @@ impl<'gc> ClassObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let scope = self.0.instance_scope.get();
-        let method = self.constructor();
+        let method = self.init_method();
         exec(
             method,
             scope,
             receiver.coerce_to_object(activation)?,
-            Some(self),
-            arguments,
-            activation,
-            self.into(),
-        )
-    }
-
-    /// Call the instance's native initializer.
-    ///
-    /// The native initializer is called when native code needs to construct an
-    /// object, or when supercalling into a parent constructor (as there are
-    /// classes that cannot be constructed but can be supercalled).
-    pub fn call_native_init(
-        self,
-        receiver: Value<'gc>,
-        arguments: &[Value<'gc>],
-        activation: &mut Activation<'_, 'gc>,
-    ) -> Result<Value<'gc>, Error<'gc>> {
-        let scope = self.0.instance_scope.get();
-        let method = self.native_constructor();
-        exec(
-            method,
-            scope,
-            receiver.coerce_to_object(activation)?,
-            Some(self),
+            self.superclass_object(),
+            Some(self.inner_class_definition()),
             arguments,
             activation,
             self.into(),
@@ -425,7 +401,7 @@ impl<'gc> ClassObject<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         let property = self.instance_vtable().get_trait(multiname);
         if property.is_none() {
-            let qualified_multiname_name = multiname.as_uri(activation.context.gc_context);
+            let qualified_multiname_name = multiname.as_uri(activation.strings());
             let qualified_class_name = self
                 .inner_class_definition()
                 .name()
@@ -444,17 +420,18 @@ impl<'gc> ClassObject<'gc> {
         if let Some(Property::Method { disp_id, .. }) = property {
             // todo: handle errors
             let ClassBoundMethod {
-                class_obj,
+                class,
+                super_class_obj,
                 scope,
                 method,
-                ..
             } = self.instance_vtable().get_full_method(disp_id).unwrap();
             let callee = FunctionObject::from_method(
                 activation,
                 method,
                 scope.expect("Scope should exist here"),
                 Some(receiver),
-                class_obj,
+                super_class_obj,
+                Some(class),
             );
 
             callee.call(receiver.into(), arguments, activation)
@@ -504,17 +481,18 @@ impl<'gc> ClassObject<'gc> {
             ) => {
                 // todo: handle errors
                 let ClassBoundMethod {
-                    class_obj,
+                    class,
+                    super_class_obj,
                     scope,
                     method,
-                    ..
                 } = self.instance_vtable().get_full_method(disp_id).unwrap();
                 let callee = FunctionObject::from_method(
                     activation,
                     method,
                     scope.expect("Scope should exist here"),
                     Some(receiver),
-                    class_obj,
+                    super_class_obj,
+                    Some(class),
                 );
 
                 // We call getters, but return the actual function object for normal methods
@@ -587,13 +565,13 @@ impl<'gc> ClassObject<'gc> {
             }) => {
                 // todo: handle errors
                 let ClassBoundMethod {
-                    class_obj,
+                    class,
+                    super_class_obj,
                     scope,
                     method,
-                    ..
                 } = self.instance_vtable().get_full_method(disp_id).unwrap();
                 let callee =
-                    FunctionObject::from_method(activation, method, scope.expect("Scope should exist here"), Some(receiver), class_obj);
+                    FunctionObject::from_method(activation, method, scope.expect("Scope should exist here"), Some(receiver), super_class_obj, Some(class));
 
                 callee.call(receiver.into(), &[value], activation)?;
                 Ok(())
@@ -635,7 +613,7 @@ impl<'gc> ClassObject<'gc> {
         // so it must be a simple Vector.<*>-derived class.
 
         let parameterized_class =
-            Class::with_type_param(&mut activation.context, self_class, class_param);
+            Class::with_type_param(activation.context, self_class, class_param);
 
         // NOTE: this isn't fully accurate, but much simpler.
         // FP's Vector is more of special case that literally copies some parent class's properties
@@ -657,19 +635,15 @@ impl<'gc> ClassObject<'gc> {
     }
 
     pub fn translation_unit(self) -> Option<TranslationUnit<'gc>> {
-        if let Method::Bytecode(bc) = self.constructor() {
+        if let Method::Bytecode(bc) = self.init_method() {
             Some(bc.txunit)
         } else {
             None
         }
     }
 
-    pub fn constructor(self) -> Method<'gc> {
+    pub fn init_method(self) -> Method<'gc> {
         self.inner_class_definition().instance_init()
-    }
-
-    pub fn native_constructor(self) -> Method<'gc> {
-        self.inner_class_definition().native_instance_init()
     }
 
     pub fn call_handler(self) -> Option<Method<'gc>> {
@@ -702,6 +676,12 @@ impl<'gc> ClassObject<'gc> {
 
     fn instance_allocator(self) -> AllocatorFn {
         self.inner_class_definition().instance_allocator().0
+    }
+
+    fn custom_constructor(self) -> Option<CustomConstructorFn> {
+        self.inner_class_definition()
+            .custom_constructor()
+            .map(|c| c.0)
     }
 
     /// Attempts to obtain the name of this class.
@@ -749,10 +729,6 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
         self.to_string(activation)
     }
 
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
-    }
-
     fn call(
         self,
         _receiver: Value<'gc>,
@@ -765,7 +741,8 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
                 call_handler,
                 scope,
                 self.into(),
-                Some(self),
+                self.superclass_object(),
+                Some(self.inner_class_definition()),
                 arguments,
                 activation,
                 self.into(),
@@ -789,15 +766,17 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         arguments: &[Value<'gc>],
     ) -> Result<Object<'gc>, Error<'gc>> {
-        let instance_allocator = self.instance_allocator();
+        if let Some(custom_constructor) = self.custom_constructor() {
+            custom_constructor(activation, arguments)
+        } else {
+            let instance_allocator = self.instance_allocator();
 
-        let instance = instance_allocator(self, activation)?;
+            let instance = instance_allocator(self, activation)?;
 
-        instance.install_instance_slots(activation.context.gc_context);
+            self.call_init(instance.into(), arguments, activation)?;
 
-        self.call_init(instance.into(), arguments, activation)?;
-
-        Ok(instance)
+            Ok(instance)
+        }
     }
 
     fn as_class_object(&self) -> Option<ClassObject<'gc>> {
@@ -858,21 +837,21 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
     }
 }
 
-impl<'gc> PartialEq for ClassObject<'gc> {
+impl PartialEq for ClassObject<'_> {
     fn eq(&self, other: &Self) -> bool {
         Object::ptr_eq(*self, *other)
     }
 }
 
-impl<'gc> Eq for ClassObject<'gc> {}
+impl Eq for ClassObject<'_> {}
 
-impl<'gc> Hash for ClassObject<'gc> {
+impl Hash for ClassObject<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.as_ptr().hash(state);
     }
 }
 
-impl<'gc> Debug for ClassObject<'gc> {
+impl Debug for ClassObject<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         f.debug_struct("ClassObject")
             .field("name", &self.debug_class_name())

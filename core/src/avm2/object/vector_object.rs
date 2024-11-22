@@ -86,8 +86,6 @@ impl<'gc> VectorObject<'gc> {
         ))
         .into();
 
-        object.install_instance_slots(activation.context.gc_context);
-
         Ok(object)
     }
 }
@@ -239,10 +237,6 @@ impl<'gc> TObject<'gc> for VectorObject<'gc> {
         } else {
             Ok(Value::Undefined)
         }
-    }
-
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
     }
 
     fn as_vector_storage(&self) -> Option<Ref<VectorStorage<'gc>>> {

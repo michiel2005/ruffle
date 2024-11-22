@@ -1,10 +1,8 @@
 //! Loader-info object
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::argument_error;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, Object, ObjectPtr, StageObject, TObject};
-use crate::avm2::value::Value;
+use crate::avm2::object::{Object, ObjectPtr, StageObject, TObject};
 use crate::avm2::Avm2;
 use crate::avm2::Error;
 use crate::avm2::EventObject;
@@ -20,20 +18,6 @@ use gc_arena::{
 };
 use std::cell::{Cell, Ref};
 use std::sync::Arc;
-
-/// ActionScript cannot construct a LoaderInfo. Note that LoaderInfo isn't a final class.
-pub fn loader_info_allocator<'gc>(
-    class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<Object<'gc>, Error<'gc>> {
-    let class_name = class.inner_class_definition().name().local_name();
-
-    Err(Error::AvmError(argument_error(
-        activation,
-        &format!("Error #2012: {class_name}$ class cannot be instantiated."),
-        2012,
-    )?))
-}
 
 /// Represents a thing which can be loaded by a loader.
 #[derive(Collect, Clone)]
@@ -61,7 +45,7 @@ pub enum LoaderStream<'gc> {
     Swf(Arc<SwfMovie>, DisplayObject<'gc>),
 }
 
-impl<'gc> LoaderStream<'gc> {
+impl LoaderStream<'_> {
     pub fn movie(&self) -> &Arc<SwfMovie> {
         match self {
             LoaderStream::NotYetLoaded(movie, _, _) => movie,
@@ -166,9 +150,8 @@ impl<'gc> LoaderInfoObject<'gc> {
             },
         ))
         .into();
-        this.install_instance_slots(activation.context.gc_context);
 
-        class.call_native_init(this.into(), &[], activation)?;
+        class.call_init(this.into(), &[], activation)?;
 
         Ok(this)
     }
@@ -214,9 +197,8 @@ impl<'gc> LoaderInfoObject<'gc> {
             },
         ))
         .into();
-        this.install_instance_slots(activation.context.gc_context);
 
-        class.call_native_init(this.into(), &[], activation)?;
+        class.call_init(this.into(), &[], activation)?;
 
         Ok(this)
     }
@@ -261,12 +243,15 @@ impl<'gc> LoaderInfoObject<'gc> {
         self.0.complete_event_fired.set(false);
     }
 
+    /// Fires the 'init' and 'complete' events if they haven't been fired yet.
+    /// Returns `true` if both events have been fired (either as a result of
+    /// this call, or due to a previous call).
     pub fn fire_init_and_complete_events(
         &self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         status: u16,
         redirected: bool,
-    ) {
+    ) -> bool {
         self.0.expose_content.set(true);
         if !self.0.init_event_fired.get() {
             self.0.init_event_fired.set(true);
@@ -291,7 +276,7 @@ impl<'gc> LoaderInfoObject<'gc> {
             };
 
             if should_complete {
-                let mut activation = Activation::from_nothing(context.reborrow());
+                let mut activation = Activation::from_nothing(context);
                 if from_url {
                     let http_status_evt = activation
                         .avm2()
@@ -315,8 +300,11 @@ impl<'gc> LoaderInfoObject<'gc> {
                 self.0.complete_event_fired.set(true);
                 let complete_evt = EventObject::bare_default_event(context, "complete");
                 Avm2::dispatch_event(context, complete_evt, (*self).into());
+                return true;
             }
+            return false;
         }
+        true
     }
 
     /// Unwrap this object's loader stream
@@ -357,7 +345,7 @@ impl<'gc> LoaderInfoObject<'gc> {
                 .expect("for_display_object cannot return Err");
 
             class_object
-                .call_native_init(object.into(), &[], activation)
+                .call_init(object.into(), &[], activation)
                 .expect("Native init should succeed");
 
             unlock!(
@@ -405,10 +393,6 @@ impl<'gc> TObject<'gc> for LoaderInfoObject<'gc> {
 
     fn as_ptr(&self) -> *const ObjectPtr {
         Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object((*self).into()))
     }
 
     fn as_loader_info_object(&self) -> Option<&LoaderInfoObject<'gc>> {

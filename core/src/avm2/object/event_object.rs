@@ -27,7 +27,7 @@ pub fn event_allocator<'gc>(
         activation.context.gc_context,
         EventObjectData {
             base,
-            event: RefLock::new(Event::new("")),
+            event: RefLock::new(Event::new(activation.strings().empty())),
         },
     ))
     .into())
@@ -61,7 +61,7 @@ impl<'gc> EventObject<'gc> {
     /// It's just slightly faster and doesn't require an Activation.
     /// This is equivalent to
     /// classes.event.construct(activation, &[event_type, false, false])
-    pub fn bare_default_event<S>(context: &mut UpdateContext<'_, 'gc>, event_type: S) -> Object<'gc>
+    pub fn bare_default_event<S>(context: &mut UpdateContext<'gc>, event_type: S) -> Object<'gc>
     where
         S: Into<AvmString<'gc>>,
     {
@@ -72,7 +72,7 @@ impl<'gc> EventObject<'gc> {
     /// It's just slightly faster and doesn't require an Activation.
     /// Note that if you need an Event subclass, you need to construct it via .construct().
     pub fn bare_event<S>(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         event_type: S,
         bubbles: bool,
         cancelable: bool,
@@ -95,10 +95,6 @@ impl<'gc> EventObject<'gc> {
             },
         ));
 
-        // not needed, as base Event has no instance slots.
-        // yes, this is flimsy. Could call this if install_instance_slots only took gc_context.
-        // event_object.install_instance_slots(activation);
-
         event_object.into()
     }
 
@@ -114,7 +110,7 @@ impl<'gc> EventObject<'gc> {
     where
         S: Into<AvmString<'gc>>,
     {
-        let local = target.local_mouse_position(&activation.context);
+        let local = target.local_mouse_position(activation.context);
 
         let event_type: AvmString<'gc> = event_type.into();
 
@@ -140,12 +136,12 @@ impl<'gc> EventObject<'gc> {
                     activation
                         .context
                         .input
-                        .is_key_down(KeyCode::Control)
+                        .is_key_down(KeyCode::CONTROL)
                         .into(),
                     // altKey
-                    activation.context.input.is_key_down(KeyCode::Alt).into(),
+                    activation.context.input.is_key_down(KeyCode::ALT).into(),
                     // shiftKey
-                    activation.context.input.is_key_down(KeyCode::Shift).into(),
+                    activation.context.input.is_key_down(KeyCode::SHIFT).into(),
                     // buttonDown
                     activation.context.input.is_key_down(button.into()).into(),
                     // delta
@@ -322,13 +318,13 @@ impl<'gc> EventObject<'gc> {
         event_type: S,
         cancelable: bool,
         related_object: Option<InteractiveObject<'gc>>,
-        key_code: u8,
+        key_code: u32,
     ) -> Object<'gc>
     where
         S: Into<AvmString<'gc>>,
     {
         let event_type: AvmString<'gc> = event_type.into();
-        let shift_key = activation.context.input.is_key_down(KeyCode::Shift);
+        let shift_key = activation.context.input.is_key_down(KeyCode::SHIFT);
 
         let class = activation.avm2().classes().focusevent;
         class
@@ -363,10 +359,6 @@ impl<'gc> TObject<'gc> for EventObject<'gc> {
         Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object((*self).into()))
-    }
-
     fn as_event(&self) -> Option<Ref<Event<'gc>>> {
         Some(self.0.event.borrow())
     }
@@ -376,7 +368,7 @@ impl<'gc> TObject<'gc> for EventObject<'gc> {
     }
 }
 
-impl<'gc> Debug for EventObject<'gc> {
+impl Debug for EventObject<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         f.debug_struct("EventObject")
             .field("type", &self.0.event.borrow().event_type())

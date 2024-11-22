@@ -19,9 +19,11 @@ use url::Url;
 use wgpu::SurfaceError;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
-use winit::event_loop::EventLoop;
+use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Theme, Window};
+
+use super::{DialogDescriptor, FilePicker};
 
 /// Integration layer connecting wgpu+winit to egui.
 pub struct GuiController {
@@ -44,9 +46,9 @@ pub struct GuiController {
 }
 
 impl GuiController {
-    pub async fn new(
+    pub fn new(
         window: Arc<Window>,
-        event_loop: &EventLoop<RuffleEvent>,
+        event_loop: EventLoopProxy<RuffleEvent>,
         preferences: GlobalPreferences,
         font_database: &Database,
         initial_movie_url: Option<Url>,
@@ -91,14 +93,22 @@ impl GuiController {
                 view_formats: Default::default(),
             },
         );
-        let event_loop = event_loop.create_proxy();
         let descriptors = Descriptors::new(instance, adapter, device, queue);
         let egui_ctx = Context::default();
 
-        let theme_controller =
-            ThemeController::new(window.clone(), preferences.clone(), egui_ctx.clone()).await;
-        let mut egui_winit =
-            egui_winit::State::new(egui_ctx, ViewportId::ROOT, window.as_ref(), None, None);
+        let theme_controller = futures::executor::block_on(ThemeController::new(
+            window.clone(),
+            preferences.clone(),
+            egui_ctx.clone(),
+        ));
+        let mut egui_winit = egui_winit::State::new(
+            egui_ctx,
+            ViewportId::ROOT,
+            window.as_ref(),
+            None,
+            None,
+            None,
+        );
         egui_winit.set_max_texture_side(descriptors.limits.max_texture_dimension_2d as usize);
 
         let movie_view_renderer = Arc::new(MovieViewRenderer::new(
@@ -112,6 +122,7 @@ impl GuiController {
             egui_wgpu::Renderer::new(&descriptors.device, surface_format, None, 1, true);
         let descriptors = Arc::new(descriptors);
         let gui = RuffleGui::new(
+            Arc::downgrade(&window),
             event_loop,
             initial_movie_url.clone(),
             LaunchOptions::from(&preferences),
@@ -146,6 +157,14 @@ impl GuiController {
 
     pub fn descriptors(&self) -> &Arc<Descriptors> {
         &self.descriptors
+    }
+
+    pub fn file_picker(&self) -> FilePicker {
+        self.gui.dialogs.file_picker()
+    }
+
+    pub fn window(&self) -> &Arc<Window> {
+        &self.window
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -208,12 +227,18 @@ impl GuiController {
         response.consumed
     }
 
+    pub fn close_movie(&mut self, player: &mut PlayerController) {
+        player.destroy();
+        self.gui.on_player_destroyed();
+    }
+
     pub fn create_movie(
         &mut self,
         player: &mut PlayerController,
         opt: LaunchOptions,
         movie_url: Url,
     ) {
+        self.close_movie(player);
         let movie_view = MovieView::new(
             self.movie_view_renderer.clone(),
             &self.descriptors.device,
@@ -340,18 +365,20 @@ impl GuiController {
         {
             let surface_view = surface_texture.texture.create_view(&Default::default());
 
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                label: Some("egui_render"),
-                ..Default::default()
-            });
+            let mut render_pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &surface_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    label: Some("egui_render"),
+                    ..Default::default()
+                })
+                .forget_lifetime();
 
             if let Some(movie_view) = movie_view {
                 movie_view.render(&self.movie_view_renderer, &mut render_pass);
@@ -388,6 +415,10 @@ impl GuiController {
 
     pub fn show_open_dialog(&mut self) {
         self.gui.dialogs.open_file_advanced()
+    }
+
+    pub fn open_dialog(&mut self, dialog_event: DialogDescriptor) {
+        self.gui.dialogs.open_dialog(dialog_event);
     }
 }
 
@@ -500,7 +531,7 @@ fn load_system_fonts(
     tracing::info!("loaded cjk fallback font \"{}\"", name);
 
     let mut fd = egui::FontDefinitions::default();
-    fd.font_data.insert(name.clone(), fontdata);
+    fd.font_data.insert(name.clone(), fontdata.into());
     fd.families
         .get_mut(&egui::FontFamily::Proportional)
         .expect("font family not found")

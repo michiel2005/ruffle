@@ -1,6 +1,6 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::api_version::ApiVersion;
-use crate::avm2::e4x::{E4XNamespace, E4XNode, E4XNodeKind};
+use crate::avm2::e4x::{string_to_multiname, E4XNamespace, E4XNode, E4XNodeKind};
 use crate::avm2::error::make_error_1089;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{Object, ObjectPtr, TObject};
@@ -48,7 +48,7 @@ pub struct XmlListObject<'gc>(pub Gc<'gc, XmlListObjectData<'gc>>);
 #[collect(no_drop)]
 pub struct XmlListObjectWeak<'gc>(pub GcWeak<'gc, XmlListObjectData<'gc>>);
 
-impl<'gc> Debug for XmlListObject<'gc> {
+impl Debug for XmlListObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("XmlListObject")
             .field("ptr", &Gc::as_ptr(self.0))
@@ -194,9 +194,9 @@ impl<'gc> XmlListObject<'gc> {
                         Some(ns) => Namespace::package(
                             ns.uri,
                             ApiVersion::AllVersions,
-                            &mut activation.context.borrow_gc(),
+                            activation.strings(),
                         ),
-                        None => activation.avm2().public_namespace_base_version,
+                        None => activation.avm2().namespaces.public_all(),
                     };
 
                     *unlock!(
@@ -290,8 +290,11 @@ impl<'gc> XmlListObject<'gc> {
                 }
 
                 // 2.e.ii. Call [[Put]] on base with arguments x.[[TargetProperty]] and the empty string
-                base.as_object()
-                    .set_property_local(&target_property, "".into(), activation)?;
+                base.as_object().set_property_local(
+                    &target_property,
+                    activation.strings().empty().into(),
+                    activation,
+                )?;
 
                 // 2.e.iii. Let target be the result of calling [[Get]] on base with argument x.[[TargetProperty]]
                 return base.get_property_local(&target_property, activation);
@@ -484,10 +487,6 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
         Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
-    }
-
     fn as_xml_list_object(&self) -> Option<Self> {
         Some(*self)
     }
@@ -637,6 +636,15 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
         })
     }
 
+    fn has_own_property_string(
+        self,
+        name: impl Into<AvmString<'gc>>,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<bool, Error<'gc>> {
+        let multiname = string_to_multiname(activation, name.into());
+        Ok(self.has_own_property(&multiname))
+    }
+
     // ECMA-357 9.2.1.2 [[Put]] (P, V)
     fn set_property_local(
         self,
@@ -713,8 +721,9 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                                 // 2.c.iv.3. Let y.[[Class]] = "attribute"
                                 E4XNode::attribute(
                                     activation.gc(),
+                                    x.explicit_namespace().map(E4XNamespace::new_uri),
                                     x.local_name().unwrap(),
-                                    "".into(),
+                                    activation.strings().empty(),
                                     r,
                                 )
                             }
@@ -722,9 +731,9 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                             // 2.c.v.1. Let y.[[Name]] = null
                             // 2.c.v.2. Let y.[[Class]] = "text"
                             Some(x) if x.is_any_name() => {
-                                E4XNode::text(activation.gc(), "".into(), r)
+                                E4XNode::text(activation.gc(), activation.strings().empty(), r)
                             }
-                            None => E4XNode::text(activation.gc(), "".into(), r),
+                            None => E4XNode::text(activation.gc(), activation.strings().empty(), r),
                             // NOTE: avmplus edge case.
                             //       See https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/XMLListObject.cpp#L297-L300
                             _ if value
@@ -734,7 +743,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                                     x.node().is_text() || x.node().is_attribute()
                                 }) =>
                             {
-                                E4XNode::text(activation.gc(), "".into(), r)
+                                E4XNode::text(activation.gc(), activation.strings().empty(), r)
                             }
 
                             // 2.c.vi. Else let y.[[Class]] = "element"
@@ -860,7 +869,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                         // FIXME: We probably need to take the namespace too.
                         // 2.e.i. Let z = ToAttributeName(x[i].[[Name]])
                         let z = Multiname::attribute(
-                            activation.avm2().public_namespace_base_version,
+                            activation.avm2().namespaces.public_all(),
                             child.local_name().expect("Attribute should have a name"),
                         );
                         // 2.e.ii. Call the [[Put]] method of x[i].[[Parent]] with arguments z and V
@@ -981,11 +990,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                         // 2.h.i. Call the [[Put]] method of x[i] with arguments "*" and V
                         self.xml_object_child(index, activation)
                             .unwrap()
-                            .set_property_local(
-                                &Multiname::any(activation.gc()),
-                                value,
-                                activation,
-                            )?;
+                            .set_property_local(&Multiname::any(), value, activation)?;
                     }
 
                     // NOTE: Not specified in the spec, but avmplus returns here, so we do the same.

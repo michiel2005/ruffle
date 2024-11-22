@@ -4,9 +4,8 @@ use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
-use crate::context::GcContext;
 use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
-use crate::string::{AvmString, WStr, WString};
+use crate::string::{AvmString, StringContext, WStr, WString};
 use gc_arena::Collect;
 use std::str;
 
@@ -518,7 +517,7 @@ pub struct SystemPrototypes<'gc> {
 
 /// Initialize default global scope and builtins for an AVM1 instance.
 pub fn create_globals<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
 ) -> (
     SystemPrototypes<'gc>,
     Object<'gc>,
@@ -1196,7 +1195,7 @@ pub fn remove_display_object<'gc>(this: DisplayObject<'gc>, activation: &mut Act
     if depth >= AVM_DEPTH_BIAS && depth < AVM_MAX_REMOVE_DEPTH && !this.avm1_removed() {
         // Need a parent to remove from.
         if let Some(mut parent) = this.avm1_parent().and_then(|o| o.as_movie_clip()) {
-            parent.remove_child(&mut activation.context, this);
+            parent.remove_child(activation.context, this);
         }
     }
 }
@@ -1207,7 +1206,7 @@ mod tests {
     use super::*;
 
     fn setup<'gc>(activation: &mut Activation<'_, 'gc>) -> Object<'gc> {
-        create_globals(&mut activation.context.borrow_gc()).1
+        create_globals(activation.strings()).1
     }
 
     test_method!(boolean_function, "Boolean", setup,

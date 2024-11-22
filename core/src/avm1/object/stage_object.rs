@@ -87,7 +87,7 @@ impl<'gc> StageObject<'gc> {
 
     /// Clears all text field bindings from this stage object, and places the textfields on the unbound list.
     /// This is called when the object is removed from the stage.
-    pub fn unregister_text_field_bindings(self, context: &mut UpdateContext<'_, 'gc>) {
+    pub fn unregister_text_field_bindings(self, context: &mut UpdateContext<'gc>) {
         for binding in self
             .0
             .write(context.gc_context)
@@ -257,10 +257,9 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
                 binding.variable_name.eq_ignore_case(&name)
             }
         }) {
-            binding.text_field.set_html_text(
-                &value.coerce_to_string(activation)?,
-                &mut activation.context,
-            );
+            binding
+                .text_field
+                .set_html_text(&value.coerce_to_string(activation)?, activation.context);
         }
 
         let base = obj.base;
@@ -592,7 +591,7 @@ fn set_visible<'gc>(
     // Because this property dates to the era of Flash 4, this is actually coerced to an integer.
     // `_visible = "false";` coerces to NaN and has no effect.
     if let Some(n) = property_coerce_to_number(activation, val)? {
-        this.set_visible(&mut activation.context, n != 0.0);
+        this.set_visible(activation.context, n != 0.0);
     }
     Ok(())
 }
@@ -607,7 +606,7 @@ fn set_width<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_width(&mut activation.context, val);
+        this.set_width(activation.context, val);
     }
     Ok(())
 }
@@ -622,7 +621,7 @@ fn set_height<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_height(&mut activation.context, val);
+        this.set_height(activation.context, val);
     }
     Ok(())
 }
@@ -678,27 +677,18 @@ fn set_name<'gc>(
 }
 
 fn drop_target<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.as_movie_clip()
-        .and_then(|mc| mc.drop_target())
-        .map_or_else(
-            || {
-                if activation.swf_version() < 6 {
-                    Value::Undefined
-                } else {
-                    "".into()
-                }
-            },
-            |drop_target| {
-                AvmString::new(activation.context.gc_context, drop_target.slash_path()).into()
-            },
-        )
+    match this.as_movie_clip().and_then(|mc| mc.drop_target()) {
+        Some(target) => AvmString::new(activation.gc(), target.slash_path()).into(),
+        None if activation.swf_version() < 6 => Value::Undefined,
+        None => activation.strings().empty().into(),
+    }
 }
 
 fn url<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.as_movie_clip().map_or_else(
-        || "".into(),
-        |mc| AvmString::new_utf8(activation.context.gc_context, mc.movie().url()).into(),
-    )
+    match this.as_movie_clip() {
+        Some(mc) => AvmString::new_utf8(activation.gc(), mc.movie().url()).into(),
+        None => activation.strings().empty().into(),
+    }
 }
 
 fn high_quality<'gc>(
@@ -733,7 +723,7 @@ fn set_high_quality<'gc>(
         activation
             .context
             .stage
-            .set_quality(&mut activation.context, quality);
+            .set_quality(activation.context, quality);
     }
     Ok(())
 }
@@ -829,18 +819,18 @@ fn set_quality<'gc>(
         activation
             .context
             .stage
-            .set_quality(&mut activation.context, quality);
+            .set_quality(activation.context, quality);
     }
     Ok(())
 }
 
 fn x_mouse<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    let local = this.local_mouse_position(&activation.context);
+    let local = this.local_mouse_position(activation.context);
     local.x.to_pixels().into()
 }
 
 fn y_mouse<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    let local = this.local_mouse_position(&activation.context);
+    let local = this.local_mouse_position(activation.context);
     local.y.to_pixels().into()
 }
 

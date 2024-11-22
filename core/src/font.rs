@@ -9,7 +9,6 @@ use ruffle_render::shape_utils::{DrawCommand, FillRule};
 use ruffle_render::transform::Transform;
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
-use std::cmp::max;
 use std::hash::{Hash, Hasher};
 use swf::FillStyle;
 
@@ -90,7 +89,7 @@ struct GlyphToDrawing<'a>(&'a mut Drawing);
 /// Convert from a TTF outline, to a flash Drawing.
 ///
 /// Note that the Y axis is flipped. I do not know why, but Flash does this.
-impl<'a> ttf_parser::OutlineBuilder for GlyphToDrawing<'a> {
+impl ttf_parser::OutlineBuilder for GlyphToDrawing<'_> {
     fn move_to(&mut self, x: f32, y: f32) {
         self.0.draw_command(DrawCommand::MoveTo(Point::new(
             Twips::new(x as i32),
@@ -618,37 +617,20 @@ impl<'gc> Font<'gc> {
         }
     }
 
-    /// Measure a particular string's metrics (width and height).
-    ///
-    /// The `round` flag causes the returned coordinates to be rounded down to
-    /// the nearest pixel.
-    pub fn measure(&self, text: &WStr, params: EvalParameters, round: bool) -> (Twips, Twips) {
+    /// Measure a particular string's width.
+    pub fn measure(&self, text: &WStr, params: EvalParameters) -> Twips {
         let mut width = Twips::ZERO;
-        let mut height = Twips::ZERO;
 
         self.evaluate(
             text,
             Default::default(),
             params,
-            |_pos, transform, _glyph, advance, _x| {
-                let tx = transform.matrix.tx;
-                let ty = transform.matrix.ty;
-
-                if round {
-                    width = width.max((tx + advance).trunc_to_pixel());
-                    height = height.max(ty.trunc_to_pixel());
-                } else {
-                    width = width.max(tx + advance);
-                    height = height.max(ty);
-                }
+            |_pos, _transform, _glyph, advance, x| {
+                width = width.max(x + advance);
             },
         );
 
-        if text.is_empty() {
-            height = max(height, params.height);
-        }
-
-        (width, height)
+        width
     }
 
     /// Given a line of text, find the first breakpoint within the text.
@@ -690,12 +672,11 @@ impl<'gc> Font<'gc> {
                 // +1 is fine because ' ' is 1 unit
                 text.slice(word_start..word_end + 1).unwrap_or(word),
                 params,
-                false,
             );
 
-            if is_start_of_line && measure.0 > remaining_width {
+            if is_start_of_line && measure > remaining_width {
                 //Failsafe for if we get a word wider than the field.
-                let mut last_passing_breakpoint = (Twips::ZERO, Twips::ZERO);
+                let mut last_passing_breakpoint = Twips::ZERO;
 
                 let cur_slice = &text[word_start..];
                 let mut char_iter = cur_slice.char_indices();
@@ -703,12 +684,11 @@ impl<'gc> Font<'gc> {
                 let mut prev_frag_end = 0;
 
                 char_iter.next(); // No need to check cur_slice[0..0]
-                while last_passing_breakpoint.0 < remaining_width {
+                while last_passing_breakpoint < remaining_width {
                     prev_char_index = word_start + prev_frag_end;
 
                     if let Some((frag_end, _)) = char_iter.next() {
-                        last_passing_breakpoint =
-                            self.measure(&cur_slice[..frag_end], params, false);
+                        last_passing_breakpoint = self.measure(&cur_slice[..frag_end], params);
 
                         prev_frag_end = frag_end;
                     } else {
@@ -717,7 +697,7 @@ impl<'gc> Font<'gc> {
                 }
 
                 return Some(prev_char_index);
-            } else if measure.0 > remaining_width {
+            } else if measure > remaining_width {
                 //The word is wider than our remaining width, return the end of
                 //the line.
                 return Some(line_end);
@@ -728,7 +708,7 @@ impl<'gc> Font<'gc> {
 
                 //If the additional space were to cause an overflow, then
                 //return now.
-                remaining_width -= measure.0;
+                remaining_width -= measure;
                 if remaining_width < Twips::from_pixels(0.0) {
                     return Some(word_end);
                 }
@@ -793,7 +773,7 @@ impl GlyphShape {
                 let mut glyph = glyph.borrow_mut();
                 Some(renderer.register_shape((&*glyph.shape()).into(), &NullBitmapSource))
             }
-            GlyphShape::Drawing(drawing) => Some(drawing.register_or_replace(renderer)),
+            GlyphShape::Drawing(drawing) => drawing.register_or_replace(renderer),
             GlyphShape::None => None,
         }
     }

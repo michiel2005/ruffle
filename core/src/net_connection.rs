@@ -45,7 +45,7 @@ impl Debug for ResponderHandle {
 impl ResponderHandle {
     pub fn call(
         &self,
-        context: &mut UpdateContext<'_, '_>,
+        context: &mut UpdateContext<'_>,
         callback: ResponderCallback,
         message: Rc<AmfValue>,
     ) {
@@ -75,7 +75,7 @@ pub enum NetConnectionObject<'gc> {
     Avm1(Avm1Object<'gc>),
 }
 
-impl<'gc> NetConnectionObject<'gc> {
+impl NetConnectionObject<'_> {
     pub fn set_handle(&self, handle: Option<NetConnectionHandle>) -> Option<NetConnectionHandle> {
         match self {
             NetConnectionObject::Avm2(object) => object.set_handle(handle),
@@ -107,7 +107,7 @@ pub struct NetConnections<'gc> {
     connections: SlotMap<NetConnectionHandle, NetConnection<'gc>>,
 }
 
-unsafe impl<'gc> Collect for NetConnections<'gc> {
+unsafe impl Collect for NetConnections<'_> {
     fn trace(&self, cc: &gc_arena::Collection) {
         for (_, connection) in self.connections.iter() {
             connection.trace(cc)
@@ -115,7 +115,7 @@ unsafe impl<'gc> Collect for NetConnections<'gc> {
     }
 }
 
-impl<'gc> Default for NetConnections<'gc> {
+impl Default for NetConnections<'_> {
     fn default() -> Self {
         Self {
             connections: SlotMap::with_key(),
@@ -125,7 +125,7 @@ impl<'gc> Default for NetConnections<'gc> {
 
 impl<'gc> NetConnections<'gc> {
     pub fn connect_to_local<O: Into<NetConnectionObject<'gc>>>(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         target: O,
     ) {
         let target = target.into();
@@ -141,7 +141,7 @@ impl<'gc> NetConnections<'gc> {
 
         match target {
             NetConnectionObject::Avm2(object) => {
-                let mut activation = Avm2Activation::from_nothing(context.reborrow());
+                let mut activation = Avm2Activation::from_nothing(context);
                 let event = Avm2EventObject::net_status_event(
                     &mut activation,
                     "netStatus",
@@ -150,7 +150,7 @@ impl<'gc> NetConnections<'gc> {
                         ("level", "status"),
                     ],
                 );
-                Avm2::dispatch_event(&mut activation.context, event, object.into());
+                Avm2::dispatch_event(activation.context, event, object.into());
             }
             NetConnectionObject::Avm1(object) => {
                 if let Err(e) = Avm1NetConnectionObject::on_status_event(
@@ -165,7 +165,7 @@ impl<'gc> NetConnections<'gc> {
     }
 
     pub fn connect_to_flash_remoting<O: Into<NetConnectionObject<'gc>>>(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         target: O,
         url: String,
     ) {
@@ -187,18 +187,14 @@ impl<'gc> NetConnections<'gc> {
         // No open event here
     }
 
-    pub fn close(
-        context: &mut UpdateContext<'_, 'gc>,
-        handle: NetConnectionHandle,
-        is_explicit: bool,
-    ) {
+    pub fn close(context: &mut UpdateContext<'gc>, handle: NetConnectionHandle, is_explicit: bool) {
         let Some(connection) = context.net_connections.connections.remove(handle) else {
             return;
         };
 
         match connection.object {
             NetConnectionObject::Avm2(object) => {
-                let mut activation = Avm2Activation::from_nothing(context.reborrow());
+                let mut activation = Avm2Activation::from_nothing(context);
                 let event = Avm2EventObject::net_status_event(
                     &mut activation,
                     "netStatus",
@@ -207,7 +203,7 @@ impl<'gc> NetConnections<'gc> {
                         ("level", "status"),
                     ],
                 );
-                Avm2::dispatch_event(&mut activation.context, event, object.into());
+                Avm2::dispatch_event(activation.context, event, object.into());
 
                 if is_explicit
                     && matches!(connection.protocol, NetConnectionProtocol::FlashRemoting(_))
@@ -223,7 +219,7 @@ impl<'gc> NetConnections<'gc> {
                             ("level", "status"),
                         ],
                     );
-                    Avm2::dispatch_event(&mut activation.context, event, object.into());
+                    Avm2::dispatch_event(activation.context, event, object.into());
                 }
             }
             NetConnectionObject::Avm1(object) => {
@@ -246,14 +242,14 @@ impl<'gc> NetConnections<'gc> {
         }
     }
 
-    pub fn update_connections(context: &mut UpdateContext<'_, 'gc>) {
+    pub fn update_connections(context: &mut UpdateContext<'gc>) {
         for (handle, connection) in context.net_connections.connections.iter_mut() {
             connection.update(handle, context.navigator, context.player.clone());
         }
     }
 
     pub fn send_without_response(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         handle: NetConnectionHandle,
         command: String,
         message: AmfValue,
@@ -264,7 +260,7 @@ impl<'gc> NetConnections<'gc> {
     }
 
     pub fn send_avm2(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         handle: NetConnectionHandle,
         command: String,
         message: AmfValue,
@@ -278,7 +274,7 @@ impl<'gc> NetConnections<'gc> {
     }
 
     pub fn send_avm1(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         handle: NetConnectionHandle,
         command: String,
         message: AmfValue,
@@ -348,7 +344,7 @@ pub struct NetConnection<'gc> {
     protocol: NetConnectionProtocol,
 }
 
-impl<'gc> NetConnection<'gc> {
+impl NetConnection<'_> {
     pub fn is_connected(&self) -> bool {
         match self.protocol {
             NetConnectionProtocol::Local => true,
@@ -546,8 +542,7 @@ impl FlashRemoting {
                         if let Some(connection) = uc.net_connections.connections.get(self_handle) {
                             match connection.object {
                                 NetConnectionObject::Avm2(object) => {
-                                    let mut activation =
-                                        Avm2Activation::from_nothing(uc.reborrow());
+                                    let mut activation = Avm2Activation::from_nothing(uc);
                                     let url = AvmString::new_utf8(
                                         activation.context.gc_context,
                                         response.url,
@@ -562,11 +557,7 @@ impl FlashRemoting {
                                             ("description", "HTTP: Failed".into()),
                                         ],
                                     );
-                                    Avm2::dispatch_event(
-                                        &mut activation.context,
-                                        event,
-                                        object.into(),
-                                    );
+                                    Avm2::dispatch_event(activation.context, event, object.into());
                                 }
                                 NetConnectionObject::Avm1(object) => {
                                     if let Err(e) =

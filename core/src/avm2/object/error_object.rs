@@ -8,7 +8,7 @@ use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::string::WString;
 use core::fmt;
-use gc_arena::{Collect, Gc, GcWeak, Mutation};
+use gc_arena::{Collect, Gc, GcWeak};
 use std::fmt::Debug;
 use tracing::{enabled, Level};
 
@@ -20,7 +20,7 @@ pub fn error_allocator<'gc>(
     let base = ScriptObjectData::new(class);
 
     let call_stack = (enabled!(Level::INFO) || cfg!(feature = "avm_debug"))
-        .then(|| activation.avm2().call_stack().read().clone())
+        .then(|| activation.avm2().call_stack().borrow().clone())
         .unwrap_or_default();
 
     Ok(ErrorObject(Gc::new(
@@ -68,7 +68,7 @@ impl<'gc> ErrorObject<'gc> {
         // by hardcoded slot id. Our `Error` class definition should fully match
         // Flash Player, and we have lots of test coverage around error, so
         // there should be very little risk to doing this.
-        let name = match self.base().get_slot(0)? {
+        let name = match self.base().get_slot(0) {
             Value::String(string) => string,
             Value::Null => "null".into(),
             Value::Undefined => "undefined".into(),
@@ -78,7 +78,7 @@ impl<'gc> ErrorObject<'gc> {
                 ))
             }
         };
-        let message = match self.base().get_slot(1)? {
+        let message = match self.base().get_slot(1) {
             Value::String(string) => string,
             Value::Null => "null".into(),
             Value::Undefined => "undefined".into(),
@@ -127,10 +127,6 @@ impl<'gc> TObject<'gc> for ErrorObject<'gc> {
 
     fn as_ptr(&self) -> *const ObjectPtr {
         Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
     }
 
     fn as_error_object(&self) -> Option<ErrorObject<'gc>> {

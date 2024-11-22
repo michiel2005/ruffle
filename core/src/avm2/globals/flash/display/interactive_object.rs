@@ -8,17 +8,6 @@ use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::display_object::{TDisplayObject, TInteractiveObject};
 
-/// Implements `flash.display.InteractiveObject`'s native instance constructor.
-pub fn native_instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    activation.super_init(this, &[])?;
-
-    Ok(Value::Undefined)
-}
-
 /// Implements `InteractiveObject.mouseEnabled`'s getter.
 pub fn get_mouse_enabled<'gc>(
     _activation: &mut Activation<'_, 'gc>,
@@ -124,7 +113,7 @@ pub fn get_tab_enabled<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(obj) = this.as_display_object().and_then(|o| o.as_interactive()) {
-        Ok(Value::Bool(obj.tab_enabled(&mut activation.context)))
+        Ok(Value::Bool(obj.tab_enabled(activation.context)))
     } else {
         Ok(Value::Undefined)
     }
@@ -140,7 +129,7 @@ pub fn set_tab_enabled<'gc>(
         .and_then(|this| this.as_interactive())
     {
         let value = args.get_bool(0);
-        obj.set_tab_enabled(&mut activation.context, value);
+        obj.set_tab_enabled(activation.context, value);
     }
 
     Ok(Value::Undefined)
@@ -173,7 +162,7 @@ pub fn set_tab_index<'gc>(
         if value < -1 {
             return Err(make_error_2027(activation, value));
         }
-        obj.set_tab_index(&mut activation.context, Some(value));
+        obj.set_tab_index(activation.context, Some(value));
     }
 
     Ok(Value::Undefined)

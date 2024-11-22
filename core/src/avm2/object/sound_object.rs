@@ -3,11 +3,10 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
-use crate::avm2::value::Value;
 use crate::avm2::Avm2;
 use crate::avm2::Error;
 use crate::avm2::EventObject;
-use crate::backend::audio::SoundHandle;
+use crate::backend::audio::{AudioManager, SoundHandle};
 use crate::context::UpdateContext;
 use crate::display_object::SoundTransform;
 use crate::string::AvmString;
@@ -123,6 +122,12 @@ impl<'gc> SoundObject<'gc> {
         .borrow_mut();
         match &mut *sound_data {
             SoundData::NotLoaded { queued_plays } => {
+                // Avoid to enqueue more unloaded sounds than the maximum allowed to be played
+                if queued_plays.len() >= AudioManager::MAX_SOUNDS {
+                    tracing::warn!("Sound.play: too many unloaded sounds queued");
+                    return Ok(false);
+                }
+
                 queued_plays.push(queued);
                 // We don't know the length yet, so return the `SoundChannel`
                 Ok(true)
@@ -133,7 +138,7 @@ impl<'gc> SoundObject<'gc> {
 
     pub fn set_sound(
         self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         sound: SoundHandle,
     ) -> Result<(), Error<'gc>> {
         let mut sound_data = unlock!(
@@ -142,7 +147,7 @@ impl<'gc> SoundObject<'gc> {
             sound_data
         )
         .borrow_mut();
-        let mut activation = Activation::from_nothing(context.reborrow());
+        let mut activation = Activation::from_nothing(context);
         match &mut *sound_data {
             SoundData::NotLoaded { queued_plays } => {
                 for queued in std::mem::take(queued_plays) {
@@ -233,8 +238,8 @@ impl<'gc> SoundObject<'gc> {
         }
         self.set_id3(activation.context.gc_context, Some(id3));
         if tag.is_ok() {
-            let id3_evt = EventObject::bare_default_event(&mut activation.context, "id3");
-            Avm2::dispatch_event(&mut activation.context, id3_evt, self.into());
+            let id3_evt = EventObject::bare_default_event(activation.context, "id3");
+            Avm2::dispatch_event(activation.context, id3_evt, self.into());
         }
     }
 }
@@ -290,10 +295,6 @@ impl<'gc> TObject<'gc> for SoundObject<'gc> {
 
     fn as_ptr(&self) -> *const ObjectPtr {
         Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Object::from(*self).into())
     }
 
     fn as_sound_object(self) -> Option<SoundObject<'gc>> {

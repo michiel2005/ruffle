@@ -8,10 +8,10 @@ use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{
     ActivationIdentifier, ExecutionReason, NativeObject, Object, ScriptObject, Value,
 };
-use crate::context::{GcContext, UpdateContext};
+use crate::context::UpdateContext;
 use crate::display_object::TDisplayObject;
 use crate::local_connection::{LocalConnectionHandle, LocalConnections};
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 use flash_lso::types::Value as AmfValue;
 use gc_arena::{Collect, Gc};
 use std::cell::RefCell;
@@ -67,7 +67,7 @@ impl<'gc> LocalConnection<'gc> {
     }
 
     pub fn send_status(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         this: Object<'gc>,
         status: &'static str,
     ) -> Result<(), Error<'gc>> {
@@ -76,7 +76,7 @@ impl<'gc> LocalConnection<'gc> {
             return Ok(());
         };
         let mut activation = Activation::from_nothing(
-            context.reborrow(),
+            context,
             ActivationIdentifier::root("[LocalConnection onStatus]"),
             root_clip,
         );
@@ -95,7 +95,7 @@ impl<'gc> LocalConnection<'gc> {
     }
 
     pub fn run_method(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         this: Object<'gc>,
         method_name: AvmString<'gc>,
         amf_arguments: Vec<AmfValue>,
@@ -105,7 +105,7 @@ impl<'gc> LocalConnection<'gc> {
             return Ok(());
         };
         let mut activation = Activation::from_nothing(
-            context.reborrow(),
+            context,
             ActivationIdentifier::root("[LocalConnection call]"),
             root_clip,
         );
@@ -245,7 +245,7 @@ pub fn constructor<'gc>(
 }
 
 pub fn create_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {

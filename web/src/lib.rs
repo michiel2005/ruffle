@@ -32,12 +32,14 @@ use std::{cell::RefCell, error::Error, num::NonZeroI32};
 use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::registry::Registry;
 use tracing_wasm::{WASMLayer, WASMLayerConfigBuilder};
+use ui::WebUiBackend;
 use url::Url;
 use wasm_bindgen::convert::FromWasmAbi;
 use wasm_bindgen::prelude::*;
 use web_sys::{
     AddEventListenerOptions, ClipboardEvent, Element, Event, EventTarget, FocusEvent,
-    HtmlCanvasElement, HtmlElement, KeyboardEvent, Node, PointerEvent, WheelEvent, Window,
+    HtmlCanvasElement, HtmlElement, KeyboardEvent, Node, PointerEvent, ShadowRoot, WheelEvent,
+    Window,
 };
 
 static RUFFLE_GLOBAL_PANIC: Once = Once::new();
@@ -56,7 +58,7 @@ thread_local! {
     /// issues with lifetimes and type parameters (which cannot be exported with wasm-bindgen).
     static INSTANCES: RefCell<SlotMap<RuffleHandle, RefCell<RuffleInstance>>> = RefCell::new(SlotMap::with_key());
 
-    static CURRENT_CONTEXT: RefCell<Option<*mut UpdateContext<'static, 'static>>> = const { RefCell::new(None) };
+    static CURRENT_CONTEXT: RefCell<Option<*mut UpdateContext<'static>>> = const { RefCell::new(None) };
 }
 
 type AnimationHandler = Closure<dyn FnMut(f64)>;
@@ -78,13 +80,14 @@ impl<E: FromWasmAbi + 'static> JsCallback<E> {
         let target = target.as_ref();
         let closure = Closure::new(closure);
 
+        let options = AddEventListenerOptions::new();
+        options.set_passive(false);
+        options.set_capture(is_capture);
         target
             .add_event_listener_with_callback_and_add_event_listener_options(
                 name,
                 closure.as_ref().unchecked_ref(),
-                AddEventListenerOptions::new()
-                    .passive(false)
-                    .capture(is_capture),
+                &options,
             )
             .warn_on_error();
 
@@ -150,8 +153,9 @@ extern "C" {
     #[wasm_bindgen(method, js_name = "getObjectId")]
     fn get_object_id(this: &JavascriptPlayer) -> Option<String>;
 
-    #[wasm_bindgen(method, catch, js_name = "onFSCommand")]
-    fn on_fs_command(this: &JavascriptPlayer, command: &str, args: &str) -> Result<bool, JsValue>;
+    #[wasm_bindgen(method, catch, js_name = "callFSCommand")]
+    fn call_fs_command(this: &JavascriptPlayer, command: &str, args: &str)
+        -> Result<bool, JsValue>;
 
     #[wasm_bindgen(method)]
     fn panic(this: &JavascriptPlayer, error: &JsError);
@@ -354,11 +358,14 @@ impl RuffleHandle {
 
     async fn run_context_menu_callback_paste(&self, index: usize) {
         let window = web_sys::window().expect("Missing window");
-        let Some(clipboard) = window.navigator().clipboard() else {
+        let navigator = window.navigator();
+        // The Clipboard API is unavailable on e.g. non-secure pages.
+        if !JsValue::from_str("clipboard").js_in(&navigator) {
             tracing::warn!("Clipboard unsupported");
             let _ = self.with_instance(|inst| inst.js_player.display_clipboard_modal(false));
             return;
-        };
+        }
+        let clipboard = window.navigator().clipboard();
 
         let promise = clipboard.read_text();
         tracing::debug!("Requested text from clipboard");
@@ -375,7 +382,11 @@ impl RuffleHandle {
         if !clipboard.is_empty() {
             let _ = self.with_core_mut(|core| {
                 core.mutate_with_update_context(|context| {
-                    context.ui.set_clipboard_content(clipboard);
+                    context
+                        .ui
+                        .downcast_mut::<WebUiBackend>()
+                        .expect("Web UI backend")
+                        .set_clipboard_content_buffer(clipboard);
                 });
                 core.run_context_menu_callback(index);
             });
@@ -509,7 +520,11 @@ impl RuffleHandle {
         // Register the instance and create the animation frame closure.
         let mut ruffle = Self::add_instance(instance)?;
 
-        Self::set_up_focus_management(ruffle, parent)?;
+        // For backward compatibility.
+        parent.set_tab_index(-1);
+
+        let shadow_host = Self::get_shadow_host(&parent);
+        Self::set_up_focus_management(ruffle, shadow_host.unwrap_or(parent))?;
 
         // Create the animation frame closure.
         ruffle.with_instance_mut(|instance| {
@@ -730,7 +745,10 @@ impl RuffleHandle {
                                     } else {
                                         "".into()
                                     };
-                                core.ui_mut().set_clipboard_content(clipboard_content);
+                                core.ui_mut()
+                                    .downcast_mut::<WebUiBackend>()
+                                    .expect("Web UI backend")
+                                    .set_clipboard_content_buffer(clipboard_content);
                                 core.handle_event(PlayerEvent::TextControl {
                                     code: TextControlCode::Paste,
                                 });
@@ -774,11 +792,18 @@ impl RuffleHandle {
         Ok(ruffle)
     }
 
+    fn get_shadow_host(element: &HtmlElement) -> Option<HtmlElement> {
+        element
+            .get_root_node()
+            .dyn_ref::<ShadowRoot>()
+            .map(|root| root.host())
+            .and_then(|el| el.dyn_into::<HtmlElement>().ok())
+    }
+
     fn set_up_focus_management(
         ruffle: RuffleHandle,
         focus_target: HtmlElement,
     ) -> Result<(), RuffleInstanceError> {
-        focus_target.set_tab_index(-1);
         ruffle.with_instance_mut(|instance| {
             let focus_target_clone = focus_target.clone();
             instance.focusin_callback = Some(JsCallback::register(

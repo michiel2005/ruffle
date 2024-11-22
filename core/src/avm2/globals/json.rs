@@ -75,7 +75,10 @@ fn deserialize_json<'gc>(
     let val = deserialize_json_inner(activation, json, reviver)?;
     match reviver {
         None => Ok(val),
-        Some(reviver) => reviver.call(Value::Null, &["".into(), val], activation),
+        Some(reviver) => {
+            let args = [activation.strings().empty().into(), val];
+            reviver.call(Value::Null, &args, activation)
+        }
     }
 }
 
@@ -235,13 +238,12 @@ impl<'gc> AvmSerializer<'gc> {
                     )?));
                 }
                 self.obj_stack.push(obj);
-                let value =
-                    if obj.is_of_type(activation.avm2().classes().array.inner_class_definition()) {
-                        // TODO: Vectors
-                        self.serialize_iterable(activation, obj)?
-                    } else {
-                        self.serialize_object(activation, obj)?
-                    };
+                let value = if obj.is_of_type(activation.avm2().class_defs().array) {
+                    // TODO: Vectors
+                    self.serialize_iterable(activation, obj)?
+                } else {
+                    self.serialize_object(activation, obj)?
+                };
                 self.obj_stack
                     .pop()
                     .expect("Stack underflow during JSON serialization");
@@ -256,7 +258,8 @@ impl<'gc> AvmSerializer<'gc> {
         activation: &mut Activation<'_, 'gc>,
         value: Value<'gc>,
     ) -> Result<JsonValue, Error<'gc>> {
-        let mapped = self.map_value(activation, || "".into(), value)?;
+        let empty = activation.strings().empty();
+        let mapped = self.map_value(activation, || empty, value)?;
         self.serialize_value(activation, mapped)
     }
 }
@@ -329,16 +332,15 @@ pub fn stringify<'gc>(
             };
             Some(indent_bytes)
         }
-    } else {
-        let indent_size = spaces
-            .as_number(activation.context.gc_context)
-            .unwrap_or(0.0)
-            .clamp(0.0, 10.0) as u16;
+    } else if spaces.is_number() {
+        let indent_size = spaces.as_f64().clamp(0.0, 10.0) as u16;
         if indent_size == 0 {
             None
         } else {
             Some(Cow::Owned(b" ".repeat(indent_size.into())))
         }
+    } else {
+        None
     };
 
     let mut serializer = AvmSerializer::new(replacer);

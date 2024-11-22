@@ -2,7 +2,7 @@ import { RuffleObjectElement } from "./internal/player/ruffle-object-element";
 import { RuffleEmbedElement } from "./internal/player/ruffle-embed-element";
 import { installPlugin, FLASH_PLUGIN } from "./plugin-polyfill";
 import { publicPath } from "./public-path";
-import type { DataLoadOptions, URLLoadOptions } from "./load-options";
+import type { DataLoadOptions, URLLoadOptions } from "./public/config";
 import { isExtension } from "./current-script";
 
 const globalConfig: DataLoadOptions | URLLoadOptions | object =
@@ -213,9 +213,7 @@ function initMutationObserver(): void {
  * Polyfills the detection of Flash plugins in the browser.
  */
 export function pluginPolyfill(): void {
-    if (!isFlashEnabledBrowser()) {
-        installPlugin(FLASH_PLUGIN);
-    }
+    installPlugin(FLASH_PLUGIN);
 }
 
 /**

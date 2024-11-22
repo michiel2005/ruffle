@@ -5,7 +5,7 @@ use crate::image_trigger::ImageTrigger;
 use crate::options::{ImageComparison, TestOptions};
 use crate::test::Test;
 use crate::util::{read_bytes, write_image};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use image::ImageFormat;
 use pretty_assertions::Comparison;
 use ruffle_core::backend::navigator::NullExecutor;
@@ -236,11 +236,11 @@ impl TestRunner {
                     },
                 },
                 AutomatedEvent::KeyDown { key_code } => PlayerEvent::KeyDown {
-                    key_code: KeyCode::from_u8(*key_code).expect("Invalid keycode in test"),
+                    key_code: KeyCode::from_code(*key_code),
                     key_char: None,
                 },
                 AutomatedEvent::KeyUp { key_code } => PlayerEvent::KeyUp {
-                    key_code: KeyCode::from_u8(*key_code).expect("Invalid keycode in test"),
+                    key_code: KeyCode::from_code(*key_code),
                     key_char: None,
                 },
                 AutomatedEvent::TextInput { codepoint } => PlayerEvent::TextInput {
@@ -403,6 +403,14 @@ impl TestRunner {
         let expected_output = self.output_path.read_to_string()?.replace("\r\n", "\n");
 
         if let Some(approximations) = &self.options.approximations {
+            let add_comparison_to_err = |err: Error| -> Error {
+                let left_pretty = PrettyString(actual_output);
+                let right_pretty = PrettyString(&expected_output);
+                let comparison = Comparison::new(&left_pretty, &right_pretty);
+
+                anyhow!("{}\n\n{}\n", err, comparison)
+            };
+
             if actual_output.lines().count() != expected_output.lines().count() {
                 return Err(anyhow!(
                     "# of lines of output didn't match (expected {} from Flash, got {} from Ruffle",
@@ -420,7 +428,9 @@ impl TestRunner {
                         continue;
                     }
 
-                    approximations.compare(actual, expected)?;
+                    approximations
+                        .compare(actual, expected)
+                        .map_err(add_comparison_to_err)?;
                 } else {
                     let mut found = false;
 
@@ -455,7 +465,9 @@ impl TestRunner {
                                     .as_str()
                                     .parse::<f64>()
                                     .expect("Failed to parse 'expected' capture group as float");
-                                approximations.compare(actual_num, expected_num)?;
+                                approximations
+                                    .compare(actual_num, expected_num)
+                                    .map_err(add_comparison_to_err)?;
                             }
                             let modified_actual = pattern.replace_all(actual, "");
                             let modified_expected = pattern.replace_all(expected, "");
@@ -539,7 +551,7 @@ fn capture_and_compare_image(
 struct PrettyString<'a>(pub &'a str);
 
 /// Make diff to display string as multi-line string
-impl<'a> std::fmt::Debug for PrettyString<'a> {
+impl std::fmt::Debug for PrettyString<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str(self.0)
     }

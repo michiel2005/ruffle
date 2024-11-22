@@ -11,9 +11,11 @@ fn get_display_object<'gc>(
     this: Object<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<DisplayObject<'gc>, Error<'gc>> {
+    let namespaces = activation.avm2().namespaces;
+
     Ok(this
         .get_property(
-            &Multiname::new(activation.avm2().flash_geom_internal, "_displayObject"),
+            &Multiname::new(namespaces.flash_geom_internal, "_displayObject"),
             activation,
         )?
         .as_object()
@@ -27,8 +29,10 @@ pub fn init<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let namespaces = activation.avm2().namespaces;
+
     this.set_property(
-        &Multiname::new(activation.avm2().flash_geom_internal, "_displayObject"),
+        &Multiname::new(namespaces.flash_geom_internal, "_displayObject"),
         args.get_value(0),
         activation,
     )?;
@@ -50,7 +54,10 @@ pub fn set_color_transform<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let ct = object_to_color_transform(args.get_object(activation, 0, "value")?, activation)?;
+    let ct = object_to_color_transform(
+        args.get_object(activation, 0, "colorTransform")?,
+        activation,
+    )?;
     let dobj = get_display_object(this, activation)?;
     dobj.set_color_transform(activation.context.gc_context, ct);
     if let Some(parent) = dobj.parent() {
@@ -73,6 +80,9 @@ pub fn set_matrix<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    // TODO: Despite what the docs say, FP accepts a null matrix here, and returns
+    // null when trying to get the matrix- but the DO's actual transform matrix will
+    // remain its previous non-null value.
     let matrix = object_to_matrix(args.get_object(activation, 0, "value")?, activation)?;
     let dobj = get_display_object(this, activation)?;
     dobj.set_matrix(activation.context.gc_context, matrix);

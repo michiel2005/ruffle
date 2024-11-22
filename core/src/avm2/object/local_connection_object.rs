@@ -9,7 +9,8 @@ use crate::local_connection::{LocalConnectionHandle, LocalConnections};
 use crate::string::AvmString;
 use core::fmt;
 use flash_lso::types::Value as AmfValue;
-use gc_arena::{Collect, Gc, GcWeak, Mutation};
+use gc_arena::barrier::unlock;
+use gc_arena::{lock::Lock, Collect, Gc, GcWeak, Mutation};
 use std::cell::RefCell;
 
 /// A class instance allocator that allocates LocalConnection objects.
@@ -19,14 +20,18 @@ pub fn local_connection_allocator<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
-    Ok(LocalConnectionObject(Gc::new(
+    let object = LocalConnectionObject(Gc::new(
         activation.context.gc_context,
         LocalConnectionObjectData {
             base,
             connection_handle: RefCell::new(None),
+            client: Lock::new(None),
         },
-    ))
-    .into())
+    ));
+
+    object.set_client(activation.gc(), object.into());
+
+    Ok(object.into())
 }
 
 #[derive(Clone, Collect, Copy)]
@@ -53,6 +58,8 @@ pub struct LocalConnectionObjectData<'gc> {
     base: ScriptObjectData<'gc>,
 
     connection_handle: RefCell<Option<LocalConnectionHandle>>,
+
+    client: Lock<Option<Object<'gc>>>,
 }
 
 const _: () = assert!(std::mem::offset_of!(LocalConnectionObjectData, base) == 0);
@@ -63,6 +70,14 @@ const _: () = assert!(
 impl<'gc> LocalConnectionObject<'gc> {
     pub fn is_connected(&self) -> bool {
         self.0.connection_handle.borrow().is_some()
+    }
+
+    pub fn client(&self) -> Object<'gc> {
+        self.0.client.get().expect("Client must be initialized")
+    }
+
+    pub fn set_client(&self, mc: &Mutation<'gc>, client: Object<'gc>) {
+        unlock!(Gc::write(mc, self.0), LocalConnectionObjectData, client).set(Some(client));
     }
 
     pub fn connect(&self, activation: &mut Activation<'_, 'gc>, name: AvmString<'gc>) -> bool {
@@ -88,8 +103,8 @@ impl<'gc> LocalConnectionObject<'gc> {
         }
     }
 
-    pub fn send_status(&self, context: &mut UpdateContext<'_, 'gc>, status: &'static str) {
-        let mut activation = Activation::from_nothing(context.reborrow());
+    pub fn send_status(&self, context: &mut UpdateContext<'gc>, status: &'static str) {
+        let mut activation = Activation::from_nothing(context);
         if let Ok(event) = activation.avm2().classes().statusevent.construct(
             &mut activation,
             &[
@@ -100,18 +115,18 @@ impl<'gc> LocalConnectionObject<'gc> {
                 status.into(),
             ],
         ) {
-            Avm2::dispatch_event(&mut activation.context, event, (*self).into());
+            Avm2::dispatch_event(activation.context, event, (*self).into());
         }
     }
 
     pub fn run_method(
         &self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         domain: Domain<'gc>,
         method_name: AvmString<'gc>,
         amf_arguments: Vec<AmfValue>,
     ) {
-        let mut activation = Activation::from_domain(context.reborrow(), domain);
+        let mut activation = Activation::from_domain(context, domain);
         let mut arguments = Vec::with_capacity(amf_arguments.len());
 
         for argument in amf_arguments {
@@ -119,29 +134,25 @@ impl<'gc> LocalConnectionObject<'gc> {
                 .push(deserialize_value(&mut activation, &argument).unwrap_or(Value::Undefined));
         }
 
-        if let Ok(client) = self
-            .get_public_property("client", &mut activation)
-            .and_then(|v| v.coerce_to_object(&mut activation))
-        {
-            if let Err(e) = client.call_public_property(method_name, &arguments, &mut activation) {
-                match e {
-                    Error::AvmError(error) => {
-                        if let Ok(event) = activation.avm2().classes().asyncerrorevent.construct(
-                            &mut activation,
-                            &[
-                                "asyncError".into(),
-                                false.into(),
-                                false.into(),
-                                error,
-                                error,
-                            ],
-                        ) {
-                            Avm2::dispatch_event(&mut activation.context, event, (*self).into());
-                        }
+        let client = self.client();
+        if let Err(e) = client.call_public_property(method_name, &arguments, &mut activation) {
+            match e {
+                Error::AvmError(error) => {
+                    if let Ok(event) = activation.avm2().classes().asyncerrorevent.construct(
+                        &mut activation,
+                        &[
+                            "asyncError".into(),
+                            false.into(),
+                            false.into(),
+                            error,
+                            error,
+                        ],
+                    ) {
+                        Avm2::dispatch_event(activation.context, event, (*self).into());
                     }
-                    _ => {
-                        tracing::error!("Unhandled error dispatching AVM2 LocalConnection method call to '{method_name}': {e}");
-                    }
+                }
+                _ => {
+                    tracing::error!("Unhandled error dispatching AVM2 LocalConnection method call to '{method_name}': {e}");
                 }
             }
         }
@@ -159,10 +170,6 @@ impl<'gc> TObject<'gc> for LocalConnectionObject<'gc> {
 
     fn as_ptr(&self) -> *const ObjectPtr {
         Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object((*self).into()))
     }
 
     fn as_local_connection_object(&self) -> Option<LocalConnectionObject<'gc>> {

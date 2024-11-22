@@ -1,11 +1,7 @@
 import * as utils from "./utils";
-import { installRuffle, PublicAPI } from "ruffle-core";
-import type {
-    Letterbox,
-    Player,
-    DataLoadOptions,
-    URLLoadOptions,
-} from "ruffle-core";
+import { Setup } from "ruffle-core";
+
+import type { Config, Player } from "ruffle-core";
 
 declare global {
     interface Navigator {
@@ -17,9 +13,9 @@ declare global {
     }
 }
 
-installRuffle("local");
-const ruffle = (window.RufflePlayer as PublicAPI).newest()!;
-let player: Player;
+Setup.installRuffle("local");
+const ruffle = (window.RufflePlayer as Setup.PublicAPI).newest()!;
+let player: Player.PlayerElement;
 
 const playerContainer = document.getElementById("player-container")!;
 const overlay = document.getElementById("overlay")!;
@@ -39,7 +35,7 @@ const grant = document.getElementById("grant")! as HTMLButtonElement;
 // This is the base config always used by the extension player.
 // It has the highest priority and its options cannot be overwritten.
 const baseExtensionConfig = {
-    letterbox: "on" as Letterbox,
+    letterbox: "on" as Config.Letterbox,
     forceScale: true,
     forceAlign: true,
     showSwfDownload: true,
@@ -102,7 +98,9 @@ function unload() {
     }
 }
 
-async function load(options: string | DataLoadOptions | URLLoadOptions) {
+async function load(
+    options: string | Config.DataLoadOptions | Config.URLLoadOptions,
+) {
     unload();
     player = ruffle.createPlayer();
     player.id = "player";
@@ -132,10 +130,11 @@ async function load(options: string | DataLoadOptions | URLLoadOptions) {
             return;
         }
     }
-    await player.load(options);
+    await player.ruffle().load(options);
     player.addEventListener("loadedmetadata", () => {
-        if (player.metadata) {
-            for (const [key, value] of Object.entries(player.metadata)) {
+        const metadata = player.ruffle().metadata;
+        if (metadata) {
+            for (const [key, value] of Object.entries(metadata)) {
                 const metadataElement = document.getElementById(key);
                 if (metadataElement) {
                     switch (key) {
@@ -246,7 +245,7 @@ reloadSwf.addEventListener("click", () => {
     if (player) {
         const confirmReload = confirm("Reload the current SWF?");
         if (confirmReload) {
-            player.reload();
+            player.ruffle().reload();
         }
     }
 });

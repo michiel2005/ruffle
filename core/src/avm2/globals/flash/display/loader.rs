@@ -26,6 +26,8 @@ pub fn loader_allocator<'gc>(
     class: ClassObject<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
+    let namespaces = activation.avm2().namespaces;
+
     // Loader does not have an associated `Character` variant, and can never be
     // instantiated from the timeline.
     let display_object = LoaderDisplay::empty(activation, activation.context.swf.clone()).into();
@@ -46,10 +48,7 @@ pub fn loader_allocator<'gc>(
         false,
     )?;
     loader.set_property(
-        &Multiname::new(
-            activation.avm2().flash_display_internal,
-            "_contentLoaderInfo",
-        ),
+        &Multiname::new(namespaces.flash_display_internal, "_contentLoaderInfo"),
         loader_info.into(),
         activation,
     )?;
@@ -61,15 +60,14 @@ pub fn load<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let namespaces = activation.avm2().namespaces;
+
     let url_request = args.get_object(activation, 0, "request")?;
     let context = args.try_get_object(activation, 1);
 
     let loader_info = this
         .get_property(
-            &Multiname::new(
-                activation.avm2().flash_display_internal,
-                "_contentLoaderInfo",
-            ),
+            &Multiname::new(namespaces.flash_display_internal, "_contentLoaderInfo"),
             activation,
         )?
         .as_object()
@@ -149,30 +147,33 @@ pub fn request_from_url_request<'gc>(
 
     let headers = url_request
         .get_public_property("requestHeaders", activation)?
-        .coerce_to_object(activation)?
-        .as_array_object()
-        .unwrap();
+        .as_object();
 
-    let headers = headers.as_array_storage().unwrap();
     let mut string_headers = IndexMap::default();
-    for i in 0..headers.length() {
-        let Some(header) = headers.get(i).and_then(|val| val.as_object()) else {
-            continue;
-        };
+    if let Some(headers) = headers {
+        let headers = headers.as_array_object().unwrap();
 
-        let name = header
-            .get_public_property("name", activation)?
-            .coerce_to_string(activation)?
-            .to_string();
-        let value = header
-            .get_public_property("value", activation)?
-            .coerce_to_string(activation)?
-            .to_string();
+        let headers = headers.as_array_storage().unwrap();
 
-        // Note - testing with Flash Player shows that later entries in the array
-        // overwrite earlier ones with the same name. Flash Player never sends an HTTP
-        // request with duplicate headers
-        string_headers.insert(name, value);
+        for i in 0..headers.length() {
+            let Some(header) = headers.get(i).and_then(|val| val.as_object()) else {
+                continue;
+            };
+
+            let name = header
+                .get_public_property("name", activation)?
+                .coerce_to_string(activation)?
+                .to_string();
+            let value = header
+                .get_public_property("value", activation)?
+                .coerce_to_string(activation)?
+                .to_string();
+
+            // Note - testing with Flash Player shows that later entries in the array
+            // overwrite earlier ones with the same name. Flash Player never sends an HTTP
+            // request with duplicate headers
+            string_headers.insert(name, value);
+        }
     }
 
     let method =
@@ -223,16 +224,15 @@ pub fn load_bytes<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let namespaces = activation.avm2().namespaces;
+
     let arg0 = args.get_object(activation, 0, "data")?;
     let bytes = arg0.as_bytearray().unwrap().bytes().to_vec();
     let context = args.try_get_object(activation, 1);
 
     let loader_info = this
         .get_property(
-            &Multiname::new(
-                activation.avm2().flash_display_internal,
-                "_contentLoaderInfo",
-            ),
+            &Multiname::new(namespaces.flash_display_internal, "_contentLoaderInfo"),
             activation,
         )?
         .as_object()
@@ -265,7 +265,7 @@ pub fn load_bytes<'gc>(
         .expect("Missing caller domain in Loader.loadBytes");
 
     if let Err(e) = LoadManager::load_movie_into_clip_bytes(
-        &mut activation.context,
+        activation.context,
         content.into(),
         bytes,
         MovieLoaderVMData::Avm2 {
@@ -287,15 +287,14 @@ pub fn unload<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let namespaces = activation.avm2().namespaces;
+
     // TODO: Broadcast an "unload" event on the LoaderInfo
     avm2_stub_method!(activation, "flash.display.Loader", "unload");
 
     let loader_info = this
         .get_property(
-            &Multiname::new(
-                activation.avm2().flash_display_internal,
-                "_contentLoaderInfo",
-            ),
+            &Multiname::new(namespaces.flash_display_internal, "_contentLoaderInfo"),
             activation,
         )?
         .as_object()

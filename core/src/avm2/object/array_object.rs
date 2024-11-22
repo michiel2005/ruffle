@@ -86,9 +86,8 @@ impl<'gc> ArrayObject<'gc> {
             },
         ))
         .into();
-        instance.install_instance_slots(activation.context.gc_context);
 
-        class.call_native_init(instance.into(), &[], activation)?;
+        class.call_init(instance.into(), &[], activation)?;
 
         Ok(instance)
     }
@@ -260,10 +259,6 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
             .map(|index| index < self.0.array.borrow().length() as u32)
             .unwrap_or(false)
             || self.base().property_is_enumerable(name)
-    }
-
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
     }
 
     fn as_array_object(&self) -> Option<ArrayObject<'gc>> {

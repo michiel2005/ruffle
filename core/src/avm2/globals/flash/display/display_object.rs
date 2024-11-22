@@ -1,9 +1,7 @@
 //! `flash.display.DisplayObject` builtin/prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{
-    argument_error, illegal_operation_error, make_error_2007, make_error_2008,
-};
+use crate::avm2::error::{illegal_operation_error, make_error_2007, make_error_2008};
 use crate::avm2::filters::FilterAvm2Ext;
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::parameters::ParametersExt;
@@ -21,19 +19,6 @@ use ruffle_render::blend::ExtendedBlendMode;
 use ruffle_render::filters::Filter;
 use std::str::FromStr;
 
-pub fn display_object_allocator<'gc>(
-    class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<Object<'gc>, Error<'gc>> {
-    let class_name = class.inner_class_definition().name().local_name();
-
-    return Err(Error::AvmError(argument_error(
-        activation,
-        &format!("Error #2012: {class_name}$ class cannot be instantiated."),
-        2012,
-    )?));
-}
-
 /// Initializes a DisplayObject created from ActionScript.
 /// This should be called from the AVM2 class's native allocator
 /// (e.g. `sprite_allocator`)
@@ -44,12 +29,12 @@ pub fn initialize_for_allocator<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     let obj: StageObject = StageObject::for_display_object(activation, dobj, class)?;
     dobj.set_placed_by_script(activation.context.gc_context, true);
-    dobj.set_object2(&mut activation.context, obj.into());
+    dobj.set_object2(activation.context, obj.into());
 
     // [NA] Should these run for everything?
-    dobj.post_instantiation(&mut activation.context, None, Instantiator::Avm2, false);
-    dobj.enter_frame(&mut activation.context);
-    dobj.construct_frame(&mut activation.context);
+    dobj.post_instantiation(activation.context, None, Instantiator::Avm2, false);
+    dobj.enter_frame(activation.context);
+    dobj.construct_frame(activation.context);
 
     // Movie clips created from ActionScript skip the next enterFrame,
     // and consequently are observed to have their currentFrame lag one
@@ -57,13 +42,13 @@ pub fn initialize_for_allocator<'gc>(
     // both placed in the same frame to begin with).
     dobj.base_mut(activation.context.gc_context)
         .set_skip_next_enter_frame(true);
-    dobj.on_construction_complete(&mut activation.context);
+    dobj.on_construction_complete(activation.context);
 
     Ok(obj.into())
 }
 
 /// Implements `flash.display.DisplayObject`'s native instance constructor.
-pub fn native_instance_init<'gc>(
+pub fn display_object_initializer<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
@@ -77,7 +62,7 @@ pub fn native_instance_init<'gc>(
 
         if let Some(container) = dobj.as_container() {
             for child in container.iter_render_list() {
-                child.construct_frame(&mut activation.context);
+                child.construct_frame(activation.context);
             }
         }
 
@@ -138,7 +123,7 @@ pub fn set_height<'gc>(
     if let Some(dobj) = this.as_display_object() {
         let new_height = args.get_f64(activation, 0)?;
         if new_height >= 0.0 {
-            dobj.set_height(&mut activation.context, new_height);
+            dobj.set_height(activation.context, new_height);
         }
     }
 
@@ -232,7 +217,7 @@ pub fn set_width<'gc>(
     if let Some(dobj) = this.as_display_object() {
         let new_width = args.get_f64(activation, 0)?;
         if new_width >= 0.0 {
-            dobj.set_width(&mut activation.context, new_width);
+            dobj.set_width(activation.context, new_width);
         }
     }
 
@@ -308,17 +293,14 @@ pub fn set_filters<'gc>(
                     let mut filter_vec = Vec::with_capacity(filters_storage.length());
 
                     for filter in filters_storage.iter().flatten() {
-                        if matches!(filter, Value::Undefined | Value::Null) {
+                        if !filter.is_of_type(activation, filter_class) {
                             return build_argument_type_error(activation);
-                        } else {
-                            let filter_object = filter.coerce_to_object(activation)?;
-
-                            if !filter_object.is_of_type(filter_class) {
-                                return build_argument_type_error(activation);
-                            }
-
-                            filter_vec.push(Filter::from_avm2_object(activation, filter_object)?);
                         }
+
+                        let filter_object = filter
+                            .as_object()
+                            .expect("BitmapFilter value should be Object");
+                        filter_vec.push(Filter::from_avm2_object(activation, filter_object)?);
                     }
 
                     dobj.set_filters(activation.context.gc_context, filter_vec);
@@ -587,7 +569,7 @@ pub fn get_stage<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(dobj) = this.as_display_object() {
         return Ok(dobj
-            .avm2_stage(&activation.context)
+            .avm2_stage(activation.context)
             .map(|stage| stage.object2())
             .unwrap_or(Value::Null));
     }
@@ -617,7 +599,7 @@ pub fn set_visible<'gc>(
     if let Some(dobj) = this.as_display_object() {
         let new_visible = args.get_bool(0);
 
-        dobj.set_visible(&mut activation.context, new_visible);
+        dobj.set_visible(activation.context, new_visible);
     }
 
     Ok(Value::Undefined)
@@ -658,7 +640,7 @@ pub fn get_mouse_x<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(dobj) = this.as_display_object() {
-        let local_mouse = dobj.local_mouse_position(&activation.context);
+        let local_mouse = dobj.local_mouse_position(activation.context);
         return Ok(local_mouse.x.to_pixels().into());
     }
 
@@ -672,7 +654,7 @@ pub fn get_mouse_y<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(dobj) = this.as_display_object() {
-        let local_mouse = dobj.local_mouse_position(&activation.context);
+        let local_mouse = dobj.local_mouse_position(activation.context);
         return Ok(local_mouse.y.to_pixels().into());
     }
 
@@ -697,16 +679,12 @@ pub fn hit_test_point<'gc>(
             .map_or(local, |root| root.local_to_global(local));
 
         if shape_flag {
-            if !dobj.is_on_stage(&activation.context) {
+            if !dobj.is_on_stage(activation.context) {
                 return Ok(false.into());
             }
 
             return Ok(dobj
-                .hit_test_shape(
-                    &mut activation.context,
-                    global,
-                    HitTestOptions::AVM_HIT_TEST,
-                )
+                .hit_test_shape(activation.context, global, HitTestOptions::AVM_HIT_TEST)
                 .into());
         } else {
             return Ok(dobj.hit_test_bounds(global).into());
@@ -775,10 +753,19 @@ pub fn set_transform<'gc>(
     // FIXME - consider 3D matrix and pixel bounds
     let matrix = transform
         .get_public_property("matrix", activation)?
-        .coerce_to_object(activation)?;
+        .as_object();
+
+    let Some(matrix) = matrix else {
+        // FP seems to not do anything when setting to a Transform with a null matrix,
+        // but we don't actually support setting the matrix to null anyway
+        // (see the comment in `flash::geom::transform::set_matrix`)
+        return Ok(Value::Undefined);
+    };
+
     let color_transform = transform
         .get_public_property("colorTransform", activation)?
-        .coerce_to_object(activation)?;
+        .as_object()
+        .expect("colorTransform should be non-null");
 
     let matrix =
         crate::avm2::globals::flash::geom::transform::object_to_matrix(matrix, activation)?;

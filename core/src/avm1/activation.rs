@@ -13,7 +13,7 @@ use crate::display_object::{
 };
 use crate::ecma_conversions::{f64_to_wrapping_i32, f64_to_wrapping_u32};
 use crate::loader::MovieLoaderVMData;
-use crate::string::{AvmString, SwfStrExt as _, WStr, WString};
+use crate::string::{AvmString, StringContext, SwfStrExt as _, WStr, WString};
 use crate::tag_utils::SwfSlice;
 use crate::vminterface::Instantiator;
 use crate::{avm_error, avm_warn};
@@ -45,7 +45,7 @@ macro_rules! avm_debug {
 #[derive(Clone)]
 pub struct RegisterSet<'gc>(SmallVec<[Value<'gc>; 8]>);
 
-unsafe impl<'gc> gc_arena::Collect for RegisterSet<'gc> {
+unsafe impl gc_arena::Collect for RegisterSet<'_> {
     #[inline]
     fn trace(&self, cc: &gc_arena::Collection) {
         for register in &self.0 {
@@ -221,7 +221,7 @@ pub struct Activation<'a, 'gc: 'a> {
     /// Whether the base clip was removed when we started this frame.
     base_clip_unloaded: bool,
 
-    pub context: UpdateContext<'a, 'gc>,
+    pub context: &'a mut UpdateContext<'gc>,
 
     /// An identifier to refer to this activation by, when debugging.
     /// This is often the name of a function (if known), or some static name to indicate where
@@ -239,13 +239,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Convenience method to retrieve the current GC context. Note that explicitly writing
     /// `self.context.gc_context` can be sometimes necessary to satisfy the borrow checker.
     #[inline(always)]
-    pub fn gc(&self) -> &'gc gc_arena::Mutation<'gc> {
+    pub fn gc(&self) -> &'gc Mutation<'gc> {
         self.context.gc_context
+    }
+
+    #[inline(always)]
+    pub fn strings(&mut self) -> &mut StringContext<'gc> {
+        &mut self.context.strings
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn from_action(
-        context: UpdateContext<'a, 'gc>,
+        context: &'a mut UpdateContext<'gc>,
         id: ActivationIdentifier<'a>,
         swf_version: u8,
         scope: Gc<'gc, Scope<'gc>>,
@@ -280,7 +285,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         avm_debug!(self.context.avm1, "START {id}");
         Activation {
             id,
-            context: self.context.reborrow(),
+            context: self.context,
             swf_version: self.swf_version,
             scope,
             constant_pool: self.constant_pool,
@@ -301,7 +306,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Note: using the returned `Activation` directly to execute arbitrary bytecode and/or
     /// to define new local variables is a logic error, and will corrupt the global scope.
     pub fn from_nothing(
-        context: UpdateContext<'a, 'gc>,
+        context: &'a mut UpdateContext<'gc>,
         id: ActivationIdentifier<'a>,
         base_clip: DisplayObject<'gc>,
     ) -> Self {
@@ -324,7 +329,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     /// Construct an empty stack frame with no code running on the root movie in
     /// layer 0.
-    pub fn from_stub(context: UpdateContext<'a, 'gc>, id: ActivationIdentifier<'a>) -> Self {
+    pub fn from_stub(context: &'a mut UpdateContext<'gc>, id: ActivationIdentifier<'a>) -> Self {
         // [NA]: we have 3 options here:
         // 1 - Don't execute anything (return None and handle that at the caller)
         // 2 - Execute something with a temporary orphaned movie
@@ -342,7 +347,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Construct an empty stack frame with no code running on the root move in
     /// layer 0.
     pub fn try_from_stub(
-        context: UpdateContext<'a, 'gc>,
+        context: &'a mut UpdateContext<'gc>,
         id: ActivationIdentifier<'a>,
     ) -> Option<Self> {
         if let Some(level0) = context.stage.root_clip() {
@@ -359,11 +364,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         active_clip: DisplayObject<'gc>,
         code: SwfSlice,
     ) -> Result<ReturnType<'gc>, Error<'gc>> {
-        let mut parent_activation = Activation::from_nothing(
-            self.context.reborrow(),
-            self.id.child("[Actions Parent]"),
-            active_clip,
-        );
+        let mut parent_activation =
+            Activation::from_nothing(self.context, self.id.child("[Actions Parent]"), active_clip);
         let clip_obj = active_clip
             .object()
             .coerce_to_object(&mut parent_activation);
@@ -378,7 +380,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let constant_pool = parent_activation.context.avm1.constant_pool();
         let child_name = parent_activation.id.child(name);
         let mut child_activation = Activation::from_action(
-            parent_activation.context.reborrow(),
+            parent_activation.context,
             child_name,
             active_clip.swf_version(),
             child_scope,
@@ -415,7 +417,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         );
         let constant_pool = self.context.avm1.constant_pool();
         let mut activation = Activation::from_action(
-            self.context.reborrow(),
+            self.context,
             self.id.child(name),
             swf_version,
             child_scope,
@@ -667,7 +669,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let source_clip = self.resolve_target_display_object(start_clip, source, true)?;
 
         if let Some(movie_clip) = source_clip.and_then(|o| o.as_movie_clip()) {
-            globals::movie_clip::clone_sprite(movie_clip, &mut self.context, target, depth, None);
+            globals::movie_clip::clone_sprite(movie_clip, self.context, target, depth, None);
         } else {
             avm_warn!(self, "CloneSprite: Source is not a movie clip");
         }
@@ -749,7 +751,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                     if let Ok(frame) = frame.parse().map(f64_to_wrapping_u32) {
                         // First try to parse as a frame number.
                         call_frame = Some((clip, frame));
-                    } else if let Some(frame) = clip.frame_label_to_number(frame, &self.context) {
+                    } else if let Some(frame) = clip.frame_label_to_number(frame, self.context) {
                         // Otherwise, it's a frame label.
                         call_frame = Some((clip, frame.into()));
                     }
@@ -759,7 +761,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         if let Some((clip, frame)) = call_frame {
             if frame <= u16::MAX.into() {
-                for action in clip.actions_on_frame(&mut self.context, frame as u16) {
+                for action in clip.actions_on_frame(self.context, frame as u16) {
                     let _ = self.run_child_frame_for_action("[Frame Call]", clip.into(), action)?;
                 }
             }
@@ -824,7 +826,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let object = object_val.coerce_to_object(self);
 
         let method_name = if method_name == Value::Undefined {
-            "".into()
+            self.strings().empty()
         } else {
             method_name.coerce_to_string(self)?
         };
@@ -866,15 +868,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         &mut self,
         action: ConstantPool,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
+        let encoding = self.encoding();
         let constants = action
             .strings
             .iter()
-            .map(|s| {
-                self.context
-                    .interner
-                    .intern_wstr(self.context.gc_context, s.decode(self.encoding()))
-                    .into()
-            })
+            .map(|s| self.strings().intern_wstr(s.decode(encoding)).into())
             .collect();
 
         self.context
@@ -1017,7 +1015,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         // We might not have had an opportunity to call `update_drag`
         // if AS did `startDrag(mc); stopDrag();` in one go,
         // so let's do it here.
-        crate::player::Player::update_drag(&mut self.context);
+        crate::player::Player::update_drag(self.context);
 
         *self.context.drag_object = None;
         Ok(FrameControl::Continue)
@@ -1208,7 +1206,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                         let level = self.get_level(level_id);
                         // Blank URL on movie loads = unload!
                         if let Some(mc) = level.and_then(|o| o.as_movie_clip()) {
-                            mc.avm1_unload_movie(&mut self.context);
+                            mc.avm1_unload_movie(self.context);
                         }
                     } else {
                         let level = self.get_or_create_level(level_id);
@@ -1333,7 +1331,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             if url.is_empty() {
                 // Blank URL on movie loads = unload!
                 if let Some(mc) = clip_target.and_then(|o| o.as_movie_clip()) {
-                    mc.avm1_unload_movie(&mut self.context);
+                    mc.avm1_unload_movie(self.context);
                 }
             } else {
                 if clip_target.is_none() && level_target > -1 {
@@ -1368,7 +1366,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 if url.is_empty() {
                     // Blank URL on movie loads = unload!
                     if let Some(mc) = clip_target.as_movie_clip() {
-                        mc.avm1_unload_movie(&mut self.context);
+                        mc.avm1_unload_movie(self.context);
                     }
                 } else {
                     let future = self.context.load_manager.load_movie_into_clip(
@@ -1401,7 +1399,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if let Some(clip) = self.target_clip() {
             if let Some(clip) = clip.as_movie_clip() {
                 // The frame on the stack is 0-based, not 1-based.
-                clip.goto_frame(&mut self.context, action.frame + 1, true);
+                clip.goto_frame(self.context, action.frame + 1, true);
             } else {
                 avm_error!(self, "GotoFrame failed: Target is not a MovieClip");
             }
@@ -1433,8 +1431,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if let Some(clip) = self.target_clip() {
             if let Some(clip) = clip.as_movie_clip() {
                 let label = action.label.decode(self.encoding());
-                if let Some(frame) = clip.frame_label_to_number(&label, &self.context) {
-                    clip.goto_frame(&mut self.context, frame, true);
+                if let Some(frame) = clip.frame_label_to_number(&label, self.context) {
+                    clip.goto_frame(self.context, frame, true);
                 } else {
                     avm_warn!(self, "GoToLabel: Frame label '{:?}' not found", label);
                 }
@@ -1690,7 +1688,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn action_next_frame(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         if let Some(clip) = self.target_clip() {
             if let Some(clip) = clip.as_movie_clip() {
-                clip.next_frame(&mut self.context);
+                clip.next_frame(self.context);
             } else {
                 avm_warn!(self, "NextFrame: Target is not a MovieClip");
             }
@@ -1724,7 +1722,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let object = object_val.coerce_to_object(self);
 
         let method_name = if method_name == Value::Undefined {
-            "".into()
+            self.strings().empty()
         } else {
             method_name.coerce_to_string(self)?
         };
@@ -1787,7 +1785,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn action_play(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         if let Some(clip) = self.target_clip() {
             if let Some(clip) = clip.as_movie_clip() {
-                clip.play(&mut self.context)
+                clip.play(self.context)
             } else {
                 avm_warn!(self, "Play: Target is not a MovieClip");
             }
@@ -1800,7 +1798,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn action_prev_frame(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         if let Some(clip) = self.target_clip() {
             if let Some(clip) = clip.as_movie_clip() {
-                clip.prev_frame(&mut self.context);
+                clip.prev_frame(self.context);
             } else {
                 avm_warn!(self, "PrevFrame: Target is not a MovieClip");
             }
@@ -2072,7 +2070,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn action_stop(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         if let Some(clip) = self.target_clip() {
             if let Some(clip) = clip.as_movie_clip() {
-                clip.stop(&mut self.context);
+                clip.stop(self.context);
             } else {
                 avm_warn!(self, "Stop: Target is not a MovieClip");
             }
@@ -2213,9 +2211,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             _ if use_bitmap_downsamping => StageQuality::Best,
             _ => StageQuality::High,
         };
-        self.context
-            .stage
-            .set_quality(&mut self.context, new_quality);
+        self.context.stage.set_quality(self.context, new_quality);
         self.context
             .stage
             .set_use_bitmap_downsampling(self.context.gc_context, use_bitmap_downsamping);
@@ -2266,7 +2262,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if let Some((catch_vars, actions)) = &action.catch_body {
             if let Err(Error::ThrownValue(value)) = &result {
                 let mut activation = Activation::from_action(
-                    self.context.reborrow(),
+                    self.context,
                     self.id.child("[Catch]"),
                     self.swf_version,
                     self.scope,
@@ -2911,10 +2907,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 MovieClip::new(self.base_clip().movie(), self.context.gc_context).into();
 
             level.set_depth(self.context.gc_context, level_id);
-            level.set_default_root_name(&mut self.context);
+            level.set_default_root_name(self.context);
             self.get_root_parent_container()
-                .and_then(|c| c.replace_at_depth(&mut self.context, level, level_id));
-            level.post_instantiation(&mut self.context, None, Instantiator::Movie, false);
+                .and_then(|c| c.replace_at_depth(self.context, level, level_id));
+            level.post_instantiation(self.context, None, Instantiator::Movie, false);
 
             level
         }

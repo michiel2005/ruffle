@@ -21,19 +21,19 @@ pub struct AvmString<'gc> {
 
 impl<'gc> AvmString<'gc> {
     /// Turns a string to a fully owned (non-dependent) managed string.
-    pub(super) fn to_fully_owned(self, gc_context: &Mutation<'gc>) -> Gc<'gc, AvmStringRepr<'gc>> {
+    pub(super) fn to_fully_owned(self, mc: &Mutation<'gc>) -> Gc<'gc, AvmStringRepr<'gc>> {
         match self.source {
             Source::Managed(s) => {
                 if s.is_dependent() {
                     let repr = AvmStringRepr::from_raw(WString::from(self.as_wstr()), false);
-                    Gc::new(gc_context, repr)
+                    Gc::new(mc, repr)
                 } else {
                     s
                 }
             }
             Source::Static(s) => {
-                let repr = AvmStringRepr::from_raw(s.into(), false);
-                Gc::new(gc_context, repr)
+                let repr = AvmStringRepr::from_raw_static(s, false);
+                Gc::new(mc, repr)
             }
         }
     }
@@ -89,9 +89,9 @@ impl<'gc> AvmString<'gc> {
         }
     }
 
-    pub fn as_wstr(&self) -> &WStr {
-        match &self.source {
-            Source::Managed(s) => s,
+    pub fn as_wstr(&self) -> &'gc WStr {
+        match self.source {
+            Source::Managed(s) => Gc::as_ref(s).as_wstr(),
             Source::Static(s) => s,
         }
     }
@@ -173,7 +173,7 @@ impl Default for AvmString<'_> {
     }
 }
 
-impl<'gc> From<&'static str> for AvmString<'gc> {
+impl From<&'static str> for AvmString<'_> {
     #[inline]
     fn from(str: &'static str) -> Self {
         // TODO(moulins): actually check that `str` is valid ASCII.
@@ -183,7 +183,7 @@ impl<'gc> From<&'static str> for AvmString<'gc> {
     }
 }
 
-impl<'gc> From<&'static WStr> for AvmString<'gc> {
+impl From<&'static WStr> for AvmString<'_> {
     #[inline]
     fn from(str: &'static WStr) -> Self {
         Self {
@@ -192,7 +192,7 @@ impl<'gc> From<&'static WStr> for AvmString<'gc> {
     }
 }
 
-impl<'gc> Deref for AvmString<'gc> {
+impl Deref for AvmString<'_> {
     type Target = WStr;
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -201,7 +201,7 @@ impl<'gc> Deref for AvmString<'gc> {
 }
 
 // Manual equality implementation with fast paths for owned strings.
-impl<'gc> PartialEq for AvmString<'gc> {
+impl PartialEq for AvmString<'_> {
     fn eq(&self, other: &Self) -> bool {
         if let (Source::Managed(left), Source::Managed(right)) = (self.source, other.source) {
             // Fast accept for identical strings.
@@ -235,6 +235,6 @@ impl<'gc> PartialEq<AvmAtom<'gc>> for AvmString<'gc> {
     }
 }
 
-impl<'gc> Eq for AvmString<'gc> {}
+impl Eq for AvmString<'_> {}
 
 wstr_impl_traits!(impl['gc] manual_eq for AvmString<'gc>);

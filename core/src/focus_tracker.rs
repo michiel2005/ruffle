@@ -87,12 +87,13 @@ impl<'gc> FocusTracker<'gc> {
     }
 
     /// Set the focus programmatically.
-    pub fn set(&self, new: Option<InteractiveObject<'gc>>, context: &mut UpdateContext<'_, 'gc>) {
+    pub fn set(&self, new: Option<InteractiveObject<'gc>>, context: &mut UpdateContext<'gc>) {
         self.set_internal(new, context, false);
+        self.update_edittext_selection(context);
     }
 
     /// Reset the focus programmatically.
-    pub fn reset_focus(&self, context: &mut UpdateContext<'_, 'gc>) {
+    pub fn reset_focus(&self, context: &mut UpdateContext<'gc>) {
         self.set_internal(None, context, true);
     }
 
@@ -100,7 +101,7 @@ impl<'gc> FocusTracker<'gc> {
     pub fn set_by_mouse(
         &self,
         new: Option<InteractiveObject<'gc>>,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
     ) {
         let old = self.0.focus.get();
 
@@ -129,7 +130,7 @@ impl<'gc> FocusTracker<'gc> {
         &self,
         new: Option<InteractiveObject<'gc>>,
         key_code: KeyCode,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
     ) {
         let old = self.0.focus.get();
         if Self::dispatch_focus_change_event(context, "keyFocusChange", old, new, Some(key_code)) {
@@ -137,12 +138,13 @@ impl<'gc> FocusTracker<'gc> {
         }
 
         self.set_internal(new, context, true);
+        self.update_edittext_selection(context);
     }
 
     fn set_internal(
         &self,
         new: Option<InteractiveObject<'gc>>,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         run_actions: bool,
     ) {
         Self::roll_over(context, new);
@@ -195,20 +197,10 @@ impl<'gc> FocusTracker<'gc> {
             }
         }
 
-        // This applies even if the focused element hasn't changed.
-        if let Some(text_field) = self.get_as_edit_text() {
-            if text_field.is_editable() && !text_field.movie().is_action_script_3() {
-                // TODO This logic is inaccurate and addresses
-                //   only setting the focus programmatically.
-                let length = text_field.text_length();
-                text_field.set_selection(Some(TextSelection::for_range(0, length)), context.gc());
-            }
-        }
-
         self.update_virtual_keyboard(context);
     }
 
-    fn update_virtual_keyboard(&self, context: &mut UpdateContext<'_, 'gc>) {
+    fn update_virtual_keyboard(&self, context: &mut UpdateContext<'gc>) {
         if let Some(text_field) = self.get_as_edit_text() {
             if text_field.is_editable() {
                 context.ui.open_virtual_keyboard();
@@ -220,11 +212,28 @@ impl<'gc> FocusTracker<'gc> {
         }
     }
 
+    /// Update selection on the newly focused text field.
+    ///
+    /// This applies even if the focused element hasn't changed.
+    fn update_edittext_selection(&self, context: &mut UpdateContext<'gc>) {
+        // Only key and programmatic focus change should trigger this, because
+        // when focusing a text field with a mouse, a caret should be placed.
+        // Note that this may suggest we should reorder operations on the text field:
+        // first run this logic (and not care whether it's a mouse focus),
+        // and then handle placing the caret.
+        if let Some(text_field) = self.get_as_edit_text() {
+            if text_field.is_editable() && !text_field.movie().is_action_script_3() {
+                let length = text_field.text_length();
+                text_field.set_selection(Some(TextSelection::for_range(0, length)), context.gc());
+            }
+        }
+    }
+
     /// Dispatches the AVM2's focus change event.
     ///
     /// Returns `true` if the focus change operation should be canceled.
     fn dispatch_focus_change_event(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         event_type: &'static str,
         target: Option<InteractiveObject<'gc>>,
         related_object: Option<InteractiveObject<'gc>>,
@@ -238,17 +247,17 @@ impl<'gc> FocusTracker<'gc> {
             return false;
         };
 
-        let mut activation = Activation::from_nothing(context.reborrow());
-        let key_code = key_code.map(|k| k as u8).unwrap_or_default();
+        let mut activation = Activation::from_nothing(context);
+        let key_code = key_code.map(|k| k.value()).unwrap_or_default();
         let event =
             EventObject::focus_event(&mut activation, event_type, true, related_object, key_code);
-        Avm2::dispatch_event(&mut activation.context, event, target);
+        Avm2::dispatch_event(activation.context, event, target);
 
         let canceled = event.as_event().unwrap().is_cancelled();
         canceled
     }
 
-    fn roll_over(context: &mut UpdateContext<'_, 'gc>, new: Option<InteractiveObject<'gc>>) {
+    fn roll_over(context: &mut UpdateContext<'gc>, new: Option<InteractiveObject<'gc>>) {
         let old = context.mouse_data.hovered;
 
         // AVM2 does not dispatch roll out/over events here and does not update hovered object.
@@ -268,13 +277,13 @@ impl<'gc> FocusTracker<'gc> {
         }
     }
 
-    pub fn tab_order(&self, context: &mut UpdateContext<'_, 'gc>) -> TabOrder<'gc> {
+    pub fn tab_order(&self, context: &mut UpdateContext<'gc>) -> TabOrder<'gc> {
         let mut tab_order = TabOrder::fill(context);
         tab_order.sort();
         tab_order
     }
 
-    pub fn cycle(&self, context: &mut UpdateContext<'_, 'gc>, reverse: bool) {
+    pub fn cycle(&self, context: &mut UpdateContext<'gc>, reverse: bool) {
         // Ordering the whole array and finding the next object in it
         // is suboptimal, but it's a simple and infrequently performed operation.
         // Additionally, we want to display the whole list in the debug UI anyway,
@@ -300,12 +309,12 @@ impl<'gc> FocusTracker<'gc> {
         };
 
         if next.is_some() {
-            self.set_by_key(next.copied(), KeyCode::Tab, context);
+            self.set_by_key(next.copied(), KeyCode::TAB, context);
             self.update_highlight(context);
         }
     }
 
-    pub fn navigate(&self, context: &mut UpdateContext<'_, 'gc>, direction: NavigationDirection) {
+    pub fn navigate(&self, context: &mut UpdateContext<'gc>, direction: NavigationDirection) {
         let Some(focus) = self.get() else {
             return;
         };
@@ -317,11 +326,11 @@ impl<'gc> FocusTracker<'gc> {
         }
     }
 
-    pub fn update_highlight(&self, context: &mut UpdateContext<'_, 'gc>) {
+    pub fn update_highlight(&self, context: &mut UpdateContext<'gc>) {
         self.0.highlight.replace(self.calculate_highlight(context));
     }
 
-    fn calculate_highlight(&self, context: &mut UpdateContext<'_, 'gc>) -> Highlight {
+    fn calculate_highlight(&self, context: &mut UpdateContext<'gc>) -> Highlight {
         let Some(focus) = self.get() else {
             return Highlight::Inactive;
         };
@@ -387,7 +396,7 @@ impl<'gc> TabOrder<'gc> {
         }
     }
 
-    fn fill(context: &mut UpdateContext<'_, 'gc>) -> Self {
+    fn fill(context: &mut UpdateContext<'gc>) -> Self {
         let stage = context.stage;
         let mut tab_order = Self::empty();
         stage.fill_tab_order(&mut tab_order, context);
@@ -528,20 +537,20 @@ pub enum NavigationDirection {
 impl NavigationDirection {
     pub fn from_key_code(key_code: KeyCode) -> Option<Self> {
         Some(match key_code {
-            KeyCode::Up => Self::Up,
-            KeyCode::Right => Self::Right,
-            KeyCode::Down => Self::Down,
-            KeyCode::Left => Self::Left,
+            KeyCode::UP => Self::Up,
+            KeyCode::RIGHT => Self::Right,
+            KeyCode::DOWN => Self::Down,
+            KeyCode::LEFT => Self::Left,
             _ => return None,
         })
     }
 
     fn key(self) -> KeyCode {
         match self {
-            Self::Up => KeyCode::Up,
-            Self::Right => KeyCode::Right,
-            Self::Down => KeyCode::Down,
-            Self::Left => KeyCode::Left,
+            Self::Up => KeyCode::UP,
+            Self::Right => KeyCode::RIGHT,
+            Self::Down => KeyCode::DOWN,
+            Self::Left => KeyCode::LEFT,
         }
     }
 }

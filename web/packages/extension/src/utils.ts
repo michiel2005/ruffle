@@ -1,8 +1,8 @@
 import type { Options } from "./common";
-import { DEFAULT_CONFIG as CORE_DEFAULT_CONFIG } from "ruffle-core";
+import { Config } from "ruffle-core";
 
 const DEFAULT_OPTIONS: Required<Options> = {
-    ...CORE_DEFAULT_CONFIG,
+    ...Config.DEFAULT_CONFIG,
     ruffleEnable: true,
     ignoreOptout: false,
     autostart: false,
@@ -100,6 +100,10 @@ export async function getExplicitOptions(): Promise<Options> {
             // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
             delete options[key];
         }
+    }
+    // This value is specific to the internal extension pages, and is always "default"
+    if ("responseHeadersUnsupported" in options) {
+        delete options["responseHeadersUnsupported"];
     }
 
     return options;
